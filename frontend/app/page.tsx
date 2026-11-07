@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { JobView } from "@/components/JobView";
 import { SettingsStep } from "@/components/SettingsStep";
 import { TopicStep } from "@/components/TopicStep";
@@ -9,6 +9,7 @@ import { DEFAULT_SETTINGS, loadSettings, saveSettings } from "@/lib/settings";
 import type { JobSettings, JobStatus } from "@/lib/types";
 
 const STEPS = ["Settings", "Topic", "Script", "Render", "Result"];
+const JOB_TITLES: Record<number, string> = { 2: "Script", 3: "Rendering video", 4: "Your video" };
 
 export default function CreatePage() {
   const [settings, setSettings] = useState<JobSettings>(DEFAULT_SETTINGS);
@@ -52,24 +53,62 @@ export default function CreatePage() {
 
   const current = jobId ? stage : step === "settings" ? 0 : 1;
 
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    titleRef.current?.focus();
+  }, [step, jobId]);
+
+  const title = jobId ? JOB_TITLES[current] ?? STEPS[current] : step === "settings" ? "Video settings" : "Choose a topic";
+
   return (
     <div className="space-y-6">
-      <ol className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+      <div className="sm:hidden">
+        <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+          Step {current + 1} of {STEPS.length} · {STEPS[current]}
+        </p>
+        <div
+          role="progressbar"
+          aria-label="Wizard progress"
+          aria-valuemin={1}
+          aria-valuemax={STEPS.length}
+          aria-valuenow={current + 1}
+          aria-valuetext={`Step ${current + 1} of ${STEPS.length}: ${STEPS[current]}`}
+          className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
+        >
+          <div
+            className="h-full rounded-full bg-indigo-600 transition-[width] motion-reduce:transition-none dark:bg-indigo-400"
+            style={{ width: `${((current + 1) / STEPS.length) * 100}%` }}
+          />
+        </div>
+      </div>
+      <ol aria-label="Progress" className="hidden flex-wrap gap-x-4 gap-y-1 text-sm sm:flex">
         {STEPS.map((s, i) => (
           <li
             key={s}
+            aria-current={i === current ? "step" : undefined}
             className={
               i === current
-                ? "font-semibold text-indigo-600 dark:text-indigo-400"
+                ? "font-semibold text-indigo-700 underline decoration-2 underline-offset-4 dark:text-indigo-300"
                 : i < current
                   ? "text-zinc-700 dark:text-zinc-300"
-                  : "text-zinc-400"
+                  : "text-zinc-600 dark:text-zinc-400"
             }
           >
+            {i < current && <span aria-hidden>✓ </span>}
             {i + 1}. {s}
+            {i < current && <span className="sr-only"> (completed)</span>}
           </li>
         ))}
       </ol>
+
+      <h1 ref={titleRef} tabIndex={-1} className="text-xl font-semibold outline-none">
+        {title}
+      </h1>
 
       {jobId ? (
         <JobViewWithStage jobId={jobId} onNew={reset} onStage={setStage} />

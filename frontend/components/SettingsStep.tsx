@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { DURATIONS } from "@/lib/settings";
 import type { JobSettings, ModelsResponse, VideoFormat } from "@/lib/types";
@@ -29,13 +29,15 @@ function Segmented<T extends string | number>({
         <button
           key={String(o.value)}
           type="button"
+          aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
-          className={`rounded-lg border px-3.5 py-2 text-sm transition-colors ${
+          className={`inline-flex min-h-11 min-w-11 touch-manipulation cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors motion-reduce:transition-none ${
             o.value === value
-              ? "border-indigo-500 bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
-              : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              ? "border-indigo-600 bg-indigo-50 font-medium text-indigo-800 dark:border-indigo-400 dark:bg-indigo-950/50 dark:text-indigo-200"
+              : "border-edge hover:bg-surface-muted"
           }`}
         >
+          {o.value === value && <CheckIcon />}
           {o.label}
         </button>
       ))}
@@ -43,12 +45,40 @@ function Segmented<T extends string | number>({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function CheckIcon() {
   return (
-    <div>
-      <label className="mb-2 block text-sm font-medium text-zinc-600 dark:text-zinc-400">
+    <svg aria-hidden viewBox="0 0 16 16" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <path d="M3 8.5l3.2 3L13 4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function Field({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
+  const labelId = useId();
+  const cls = "mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300";
+  if (htmlFor) {
+    return (
+      <div>
+        <label htmlFor={htmlFor} className={cls}>
+          {label}
+        </label>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <div role="group" aria-labelledby={labelId}>
+      <span id={labelId} className={cls}>
         {label}
-      </label>
+      </span>
       {children}
     </div>
   );
@@ -66,6 +96,7 @@ export function SettingsStep({
   const [models, setModels] = useState<ModelsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const modelId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -95,19 +126,18 @@ export function SettingsStep({
 
   return (
     <Card className="space-y-6">
-      <h2 className="text-lg font-semibold">Video settings</h2>
-
       <Field label="Format">
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           {(["vertical", "horizontal"] as const).map((f) => (
             <button
               key={f}
               type="button"
+              aria-pressed={settings.format === f}
               onClick={() => setFormat(f)}
-              className={`flex w-40 items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
+              className={`flex min-h-11 flex-1 touch-manipulation cursor-pointer items-center gap-3 rounded-xl border p-3 text-left transition-colors motion-reduce:transition-none sm:w-44 sm:flex-none ${
                 settings.format === f
-                  ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
-                  : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  ? "border-indigo-600 bg-indigo-50 text-indigo-800 dark:border-indigo-400 dark:bg-indigo-950/50 dark:text-indigo-200"
+                  : "border-edge hover:bg-surface-muted"
               }`}
             >
               <span className="flex h-9 w-9 items-center justify-center">
@@ -115,8 +145,19 @@ export function SettingsStep({
               </span>
               <span className="text-sm">
                 <span className="block font-medium">{f === "vertical" ? "Vertical" : "Horizontal"}</span>
-                <span className="text-xs opacity-70">{f === "vertical" ? "9:16 Shorts" : "16:9 Video"}</span>
+                <span
+                  className={`text-xs ${
+                    settings.format === f ? "text-indigo-900 dark:text-indigo-200" : "text-zinc-600 dark:text-zinc-400"
+                  }`}
+                >
+                  {f === "vertical" ? "9:16 Shorts" : "16:9 Video"}
+                </span>
               </span>
+              {settings.format === f && (
+                <span className="ml-auto">
+                  <CheckIcon />
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -153,13 +194,14 @@ export function SettingsStep({
         </Field>
       </div>
 
-      <Field label="Text model">
+      <Field label="Text model" htmlFor={models && !error ? modelId : undefined}>
         {error ? (
           <ErrorBox message={error} title="Could not load models" onRetry={() => setAttempt((a) => a + 1)} />
         ) : !models ? (
-          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-11 w-full" />
         ) : (
           <select
+            id={modelId}
             className={inputCls}
             value={settings.model ?? models.default}
             onChange={(e) => set({ model: e.target.value })}

@@ -3,11 +3,27 @@
 :root {
   --background: #fafafa;
   --foreground: #171717;
+  --surface: #ffffff;
+  --surface-muted: #f4f4f5;
+  --field: #ffffff;
+  --edge: #71717a;
+  --edge-soft: #e4e4e7;
+  --muted: #52525b;
+  --primary: #4f46e5;
+  --ring: #4f46e5;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-field: var(--field);
+  --color-edge: var(--edge);
+  --color-edge-soft: var(--edge-soft);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-ring: var(--ring);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -16,11 +32,55 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --surface: #18181b;
+    --surface-muted: #27272a;
+    --field: #09090b;
+    --edge: #71717a;
+    --edge-soft: #27272a;
+    --muted: #a1a1aa;
+    --primary: #6366f1;
+    --ring: #818cf8;
   }
+}
+
+html {
+  color-scheme: light dark;
+  scroll-padding-top: 4.5rem;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.ring-within:has(:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+button,
+[role="button"],
+summary {
+  touch-action: manipulation;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

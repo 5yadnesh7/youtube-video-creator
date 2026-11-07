@@ -1,14 +1,226 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, errorMessage } from "@/lib/api";
 import { usePolling } from "@/lib/usePolling";
 import type { Job, JobStatus, Script } from "@/lib/types";
-import { ResultView } from "./ResultView";
+import { FOCUS, FormatChip, ResultView, StatusPill } from "./ResultView";
 import { ScriptEditor } from "./ScriptEditor";
-import { Button, Card, ErrorBox, Skeleton, Spinner, StatusBadge } from "./ui";
+import { Button, Card, ErrorBox, Skeleton, Spinner } from "./ui";
 
 const active = (j: Job) => j.status === "scripting" || j.status === "rendering";
+
+function useElapsed(): number {
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const t = setInterval(() => setSec(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return sec;
+}
+
+const fmtElapsed = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+function stepHint(step: string): string {
+  const s = step.toLowerCase();
+  if (/voice|speech|tts|audio|narrat/.test(s)) return "Turning the script into narration audio.";
+  if (/image|media|visual|footage|clip|download/.test(s)) return "Collecting images and clips for each scene.";
+  if (/caption|subtitle/.test(s)) return "Timing captions to the narration.";
+  if (/seo|metadata/.test(s)) return "Writing the YouTube title, description and tags.";
+  if (/render|assembl|encod|compos|final|mux/.test(s)) return "Stitching scenes, audio and captions into the MP4.";
+  return "Working through the pipeline; the step name above updates as it moves along.";
+}
+
+function parseLimitError(msg: string): { resetAt: string } | null {
+  if (!/daily limit|free-models-per-day|per-day/i.test(msg)) return null;
+  const m = msg.match(/reset['"\s:=]*?(\d{10,13})/i);
+  if (m) {
+    const n = Number(m[1]);
+    const d = new Date(m[1].length <= 10 ? n * 1000 : n);
+    if (!Number.isNaN(d.getTime())) {
+      return { resetAt: d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) };
+    }
+  }
+  const t = msg.match(/resets?\s+(?:at|in|on)?\s*([^.\n]{3,40})/i);
+  return { resetAt: t ? t[1].trim() : "around midnight UTC" };
+}
+
+function FailedCard({
+  job,
+  busy,
+  onRetry,
+  onNew,
+}: {
+  job: Job;
+  busy: boolean;
+  onRetry: () => void;
+  onNew?: () => void;
+}) {
+  const raw = job.error || "Unknown error";
+  const limit = parseLimitError(raw);
+  const title = job.script ? "Rendering failed" : "Script generation failed";
+  return (
+    <div className="space-y-4">
+      {limit ? (
+        <div
+          role="alert"
+          className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          <p className="font-semibold">Daily AI quota reached</p>
+          <p className="mt-1">
+            OpenRouter&apos;s free quota (50 requests/day) is used up. It resets at {limit.resetAt}.
+          </p>
+          <p className="mt-2">Options:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>Wait until the quota resets, then retry.</li>
+            <li>
+              Add credits on{" "}
+              <a
+                href="https://openrouter.ai/credits"
+                target="_blank"
+                rel="noreferrer"
+                className={`inline-flex min-h-6 items-center rounded font-medium underline ${FOCUS}`}
+              >
+                openrouter.ai
+              </a>
+              .
+            </li>
+          </ul>
+          <details className="mt-3">
+            <summary className={`flex min-h-11 cursor-pointer items-center rounded ${FOCUS}`}>Show raw error</summary>
+            <pre className="mt-1 max-w-full whitespace-pre-wrap rounded bg-white/70 p-2 text-xs [overflow-wrap:anywhere] dark:bg-black/30">
+              {raw}
+            </pre>
+          </details>
+        </div>
+      ) : (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+        >
+          <p className="font-semibold">{title}</p>
+          <p className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{raw}</p>
+        </div>
+      )}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+        <Button disabled={busy} onClick={onRetry} className={`min-h-11 ${FOCUS}`}>
+          {busy && <Spinner className="h-3.5 w-3.5 motion-reduce:animate-none" />}
+          {busy ? "Retrying…" : "Retry"}
+        </Button>
+        <Link
+          href="/videos"
+          className={`inline-flex min-h-11 items-center justify-center rounded-lg border border-zinc-400 px-4 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800 ${FOCUS}`}
+        >
+          Back to videos
+        </Link>
+        {onNew && (
+          <Button variant="secondary" onClick={onNew} className={`min-h-11 !border-zinc-400 dark:!border-zinc-600 ${FOCUS}`}>
+            Start over
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RenderProgress({ step, progress }: { step: string; progress: number }) {
+  const elapsed = useElapsed();
+  const [announce, setAnnounce] = useState("");
+  const last = useRef({ step: "", bucket: -1 });
+  const name = step || "Rendering";
+  useEffect(() => {
+    const bucket = Math.floor(progress / 25);
+    if (last.current.step !== name || last.current.bucket !== bucket) {
+      last.current = { step: name, bucket };
+      setAnnounce(`${name}, ${progress}%`);
+    }
+  }, [name, progress]);
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="flex min-w-0 items-center gap-2 font-medium">
+          <Spinner className="h-4 w-4 shrink-0 motion-reduce:animate-none" />
+          <span className="min-w-0 break-words">{name}</span>
+        </span>
+        <span className="font-semibold tabular-nums">{progress}%</span>
+      </div>
+      <div
+        className="h-3 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
+        role="progressbar"
+        aria-label="Video render progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+        aria-valuetext={`${name}, ${progress}%`}
+      >
+        <div
+          className="h-full rounded-full bg-indigo-600 transition-all duration-500 motion-reduce:transition-none dark:bg-indigo-500"
+          style={{ width: `${Math.max(2, progress)}%` }}
+        />
+      </div>
+      <p className="text-sm text-zinc-700 dark:text-zinc-300">{stepHint(name)}</p>
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        Elapsed {fmtElapsed(elapsed)}. This can take a few minutes. You can leave and come back from{" "}
+        <Link href="/videos" className={`rounded underline ${FOCUS}`}>
+          Videos
+        </Link>
+        .
+      </p>
+      <p role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </p>
+    </Card>
+  );
+}
+
+function ScriptingProgress({ step }: { step: string }) {
+  const elapsed = useElapsed();
+  const researching = !/writing/i.test(step);
+  const stages = [
+    { n: 1, label: "Researching the topic", active: researching, done: !researching },
+    { n: 2, label: "Writing the script", active: !researching, done: false },
+  ];
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-center gap-3">
+        <Spinner className="motion-reduce:animate-none" />
+        <p className="text-lg font-semibold">{step || "Researching topic"}</p>
+      </div>
+      <ol className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+        {stages.map((st) => (
+          <li
+            key={st.n}
+            aria-current={st.active ? "step" : undefined}
+            className={`flex items-center gap-1.5 ${
+              st.active
+                ? "font-semibold text-indigo-700 dark:text-indigo-300"
+                : st.done
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-zinc-600 dark:text-zinc-400"
+            }`}
+          >
+            <span aria-hidden>{st.done ? "✓" : st.active ? "●" : "○"}</span>
+            {st.n}. {st.label}
+            <span className="sr-only">{st.done ? " (finished)" : st.active ? " (in progress)" : " (waiting)"}</span>
+          </li>
+        ))}
+      </ol>
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        Research can take up to about a minute. Elapsed {fmtElapsed(elapsed)}.
+      </p>
+      <div aria-hidden className="space-y-3">
+        <Skeleton className="h-10 motion-reduce:animate-none" />
+        <Skeleton className="h-24 motion-reduce:animate-none" />
+        <Skeleton className="h-24 motion-reduce:animate-none" />
+      </div>
+      <p role="status" aria-live="polite" className="sr-only">
+        {researching ? "Researching the topic" : "Writing the script"}
+      </p>
+    </Card>
+  );
+}
 
 export function JobView({
   jobId,
@@ -45,50 +257,45 @@ export function JobView({
     set(await api.render(job.id, { voice_id: voiceId, reuse_media: true }));
   };
 
-  if (loading) return <Skeleton className="h-64 w-full" />;
+  if (loading) {
+    return (
+      <div role="status">
+        <span className="sr-only">Loading…</span>
+        <Skeleton className="h-64 w-full motion-reduce:animate-none" />
+      </div>
+    );
+  }
   if (!job) return <ErrorBox message={error ?? "Job not found"} onRetry={refresh} />;
 
   const target = job.settings.duration_seconds;
   const header = (
     <div className="mb-4 flex flex-wrap items-center gap-2">
-      <h2 className="text-xl font-semibold">{job.script?.title || job.topic}</h2>
-      <StatusBadge status={job.status} />
-      <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-xs dark:bg-zinc-700">
-        {job.settings.format === "vertical" ? "9:16" : "16:9"}
-      </span>
+      <h1 className="min-w-0 text-xl font-semibold [overflow-wrap:anywhere]">{job.script?.title || job.topic}</h1>
+      <StatusPill status={job.status} />
+      <FormatChip format={job.settings.format} />
     </div>
   );
 
   const pollErr = error && active(job) && (
-    <p className="mb-3 text-sm text-amber-600 dark:text-amber-400">Connection issue, retrying: {error}</p>
+    <p role="status" className="mb-3 text-sm text-amber-700 dark:text-amber-400">
+      Connection issue, retrying: {error}
+    </p>
   );
-  const actionErr = actionError && <div className="mb-4"><ErrorBox message={actionError} /></div>;
+  const actionErr = actionError && (
+    <div className="mb-4">
+      <ErrorBox message={actionError} />
+    </div>
+  );
 
   const retryScript = () => run(() => api.regenerateScript(job.id));
   const doRender = () => run(() => api.render(job.id));
 
   if (job.status === "scripting") {
-    const researching = !/writing/i.test(job.step ?? "");
-    const stageOn = "font-semibold text-indigo-600 dark:text-indigo-400";
-    const stageOff = "text-zinc-500";
     return (
       <div>
         {header}
         {pollErr}
-        <Card className="space-y-3">
-          <div className="flex items-center gap-3">
-            <Spinner />
-            <p className="text-lg font-semibold">{job.step || "Researching topic"}</p>
-          </div>
-          <p className="text-sm">
-            <span className={researching ? stageOn : stageOff}>1. Researching the topic</span>
-            <span className="text-zinc-400"> → </span>
-            <span className={researching ? stageOff : stageOn}>2. Writing the script</span>
-          </p>
-          <Skeleton className="h-10" />
-          <Skeleton className="h-24" />
-          <Skeleton className="h-24" />
-        </Card>
+        <ScriptingProgress step={job.step} />
       </div>
     );
   }
@@ -124,25 +331,7 @@ export function JobView({
       <div>
         {header}
         {pollErr}
-        <Card className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-medium">{job.step || "Rendering"}</span>
-            <span className="tabular-nums">{job.progress}%</span>
-          </div>
-          <div
-            className="h-3 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
-            role="progressbar"
-            aria-valuenow={job.progress}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
-            <div
-              className="h-full rounded-full bg-indigo-600 transition-all duration-500"
-              style={{ width: `${Math.max(2, job.progress)}%` }}
-            />
-          </div>
-          <p className="text-xs text-zinc-500">This can take a few minutes. You can leave and come back from Videos.</p>
-        </Card>
+        <RenderProgress step={job.step} progress={job.progress} />
       </div>
     );
   }
@@ -160,21 +349,7 @@ export function JobView({
     <div>
       {header}
       {actionErr}
-      <ErrorBox
-        title={job.script ? "Rendering failed" : "Script generation failed"}
-        message={job.error || "Unknown error"}
-      />
-      <div className="mt-4 flex gap-2">
-        <Button disabled={busy} onClick={job.script ? doRender : retryScript}>
-          {busy && <Spinner className="h-3.5 w-3.5" />}
-          Retry
-        </Button>
-        {onNew && (
-          <Button variant="secondary" onClick={onNew}>
-            Start over
-          </Button>
-        )}
-      </div>
+      <FailedCard job={job} busy={busy} onRetry={job.script ? doRender : retryScript} onNew={onNew} />
     </div>
   );
 }

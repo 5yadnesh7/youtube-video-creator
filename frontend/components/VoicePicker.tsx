@@ -5,6 +5,9 @@ import { api, errorMessage } from "@/lib/api";
 import type { Language, VoiceGender, VoiceOption, VoicesResponse } from "@/lib/types";
 import { Button, Skeleton } from "./ui";
 
+const focusRing =
+  "outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-indigo-400 dark:focus-visible:ring-offset-zinc-900";
+
 const MAX_PREVIEW_MS = 5000;
 
 type Filter = "all" | VoiceGender;
@@ -64,6 +67,8 @@ export function VoicePicker({
     latest.current = { value, onChange, onLoaded };
   });
   const groupName = useId();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollable, setScrollable] = useState(false);
 
   const stop = useCallback(() => {
     reqRef.current++;
@@ -149,6 +154,18 @@ export function VoicePicker({
     groups.set(o.provider_label, g);
   }
 
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const check = () => setScrollable(el.scrollHeight > el.clientHeight + 1);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  });
+
   const status = loadError
     ? "Could not load voices."
     : !data
@@ -167,7 +184,7 @@ export function VoicePicker({
         {status}
       </p>
       {loadError ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
           <p>Could not load voices: {loadError}</p>
           <Button
             variant="secondary"
@@ -186,7 +203,7 @@ export function VoicePicker({
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-11 w-full" />
           ))}
-          <span className="text-xs text-zinc-500">Loading voices...</span>
+          <span className="text-xs text-zinc-600 dark:text-zinc-400">Loading voices...</span>
         </div>
       ) : (
         <>
@@ -197,21 +214,33 @@ export function VoicePicker({
                 type="button"
                 aria-pressed={filter === f}
                 onClick={() => setChip(f)}
-                className={`min-h-9 rounded-full border px-3 text-xs font-medium capitalize outline-none transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+                className={`min-h-11 min-w-11 rounded-full border px-4 text-sm font-medium capitalize transition-colors motion-reduce:transition-none ${focusRing} ${
                   filter === f
                     ? "border-indigo-600 bg-indigo-600 text-white"
-                    : "border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    : "border-zinc-400 text-zinc-800 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 }`}
               >
                 {f}
               </button>
             ))}
           </div>
-          <div role="radiogroup" aria-label="Voice" className="space-y-3 sm:max-h-80 sm:overflow-y-auto sm:pr-1">
-            {groups.size === 0 && <p className="text-sm text-zinc-500">No voices match this filter.</p>}
+          <div
+            ref={scrollRef}
+            tabIndex={scrollable ? 0 : undefined}
+            role={scrollable ? "region" : undefined}
+            aria-label={scrollable ? "Voices" : undefined}
+            className={`rounded-lg sm:max-h-80 sm:overflow-y-auto sm:p-1 ${scrollable ? focusRing : ""}`}
+          >
+          <div role="radiogroup" aria-label="Voice" className="space-y-3">
+            {groups.size === 0 && <p className="text-sm text-zinc-600 dark:text-zinc-400">No voices match this filter.</p>}
             {[...groups].map(([label, list]) => (
-              <div key={label} className="space-y-1.5">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{label}</h4>
+              <div key={label} className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-400">{label}</h3>
+                {list.some((o) => o.experimental) && (
+                  <p className="text-xs text-amber-800 dark:text-amber-300">
+                    Experimental voices: Hindi support not verified for these voices
+                  </p>
+                )}
                 {list.map((o) => {
                   const selected = o.id === value;
                   const p = preview?.id === o.id ? preview : null;
@@ -220,10 +249,10 @@ export function VoicePicker({
                     <div
                       key={o.id}
                       onClick={() => !disabled && onChange(o.id)}
-                      className={`flex min-h-11 items-center gap-2 rounded-lg border px-2 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-indigo-500 ${
+                      className={`flex min-h-11 items-center gap-2 rounded-lg border px-2 transition-colors motion-reduce:transition-none has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-indigo-500 has-[:focus-visible]:ring-offset-2 has-[:focus-visible]:ring-offset-white dark:has-[:focus-visible]:ring-indigo-400 dark:has-[:focus-visible]:ring-offset-zinc-900 ${
                         selected
                           ? "border-indigo-600 bg-indigo-50 dark:border-indigo-400 dark:bg-indigo-950/40"
-                          : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/60"
+                          : "border-zinc-400 hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-800/60"
                       } ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
                     >
                       <button
@@ -236,7 +265,7 @@ export function VoicePicker({
                           e.stopPropagation();
                           void togglePreview(o);
                         }}
-                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:cursor-not-allowed"
+                        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full disabled:cursor-not-allowed ${focusRing}`}
                       >
                         <span className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-white">
                           {p?.state === "loading" ? (
@@ -271,20 +300,20 @@ export function VoicePicker({
                           </span>
                         )}
                       </label>
-                      <span className="w-24 shrink-0 truncate text-right text-xs text-zinc-500" aria-hidden>
-                        {err ? (
-                          <span className="text-red-600 dark:text-red-400">{err}</span>
-                        ) : p?.state === "loading" ? (
-                          "Loading..."
-                        ) : p ? (
-                          "Playing"
-                        ) : null}
-                      </span>
+                      {err ? (
+                        <span role="alert" className="max-w-24 shrink-0 text-right text-xs font-medium text-red-700 dark:text-red-400">
+                          {err}
+                        </span>
+                      ) : (
+                        <span className="w-16 shrink-0 text-right text-xs text-zinc-600 dark:text-zinc-400" aria-hidden>
+                          {p?.state === "loading" ? "Loading..." : p ? "Playing" : null}
+                        </span>
+                      )}
                       <span
                         className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${
                           selected
                             ? "border-indigo-600 bg-indigo-600 text-white dark:border-indigo-400 dark:bg-indigo-500"
-                            : "border-zinc-300 dark:border-zinc-600"
+                            : "border-zinc-500 dark:border-zinc-400"
                         }`}
                         aria-hidden
                       >
@@ -295,6 +324,7 @@ export function VoicePicker({
                 })}
               </div>
             ))}
+          </div>
           </div>
         </>
       )}
