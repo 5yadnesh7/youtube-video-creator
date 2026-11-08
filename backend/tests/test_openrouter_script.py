@@ -395,3 +395,11 @@ def test_clamp_without_sentence_breaks_falls_back_to_dropping_scenes():
     out = script_mod._clamp(Script(title="T", hook="H", scenes=scenes), words=100, scenes=8)
     assert sum(len(s.narration.split()) for s in out.scenes) <= 112
     assert all(len(s.narration.split()) == 20 for s in out.scenes)  # scenes dropped, none chopped
+
+
+def test_narration_is_cleaned_of_invisible_and_lookalike_characters():
+    data = {"title": "T", "hook": "H", "scenes": [
+        {"narration": "Gas‑filled magma rises fast​,  really.", "visual_query": "x",
+         "media_type": "video", "mood": "calm"}]}
+    s = script_mod._parse(data)
+    assert s.scenes[0].narration == "Gas-filled magma rises fast, really."

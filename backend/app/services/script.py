@@ -89,6 +89,14 @@ Return JSON exactly in this shape:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+_ODD_CHARS = {0x202F: " ", 0x00A0: " ", 0x2009: " ", 0x200B: None, 0x2011: "-"}
+
+
+def _clean(text: str) -> str:
+    """Models sometimes emit invisible or look-alike characters that voices read badly."""
+    return re.sub(r"[ 	]+", " ", text.translate(_ODD_CHARS)).strip()
+
+
 def _parse(data: dict) -> Script:
     scenes_raw = data.get("scenes")
     if not isinstance(scenes_raw, list):
@@ -97,7 +105,7 @@ def _parse(data: dict) -> Script:
     for s in scenes_raw:
         if not isinstance(s, dict):
             continue
-        narration = str(s.get("narration", "")).strip()
+        narration = _clean(str(s.get("narration", "")))
         if not narration:
             continue
         query = re.sub(r"\s+", " ", str(s.get("visual_query", "")).strip()) or "abstract background"
