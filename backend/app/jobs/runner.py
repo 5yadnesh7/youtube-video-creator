@@ -73,15 +73,21 @@ class Stages:
     def _stage(self, key: str) -> Stage:
         return next(st for st in self.job.stages if st.key == key)
 
-    def start(self, key: str, detail: str = "") -> None:
+    def start(self, key: str, detail: str = "", parallel: bool = False) -> None:
         with self._lock:
             st = self._stage(key)
             if st.status == "running":
                 return
-            for other in self.job.stages:
-                if other.status == "running":
-                    self._close(other, "done")
+            if not parallel:
+                for other in self.job.stages:
+                    if other.status == "running":
+                        self._close(other, "done")
             st.status, st.started_at, st.detail = "running", _now(), detail
+            store.save(self.job)
+
+    def fail(self, key: str) -> None:
+        with self._lock:
+            self._close(self._stage(key), "failed")
             store.save(self.job)
 
     def update(self, key: str, *, done: int | None = None, total: int | None = None,
@@ -248,6 +254,29 @@ def _scaled(job: Job, lo: int, hi: int, tr: Stages | None = None, key: str = "",
     return cb
 
 
+def _estimated_durations(scenes, language: str) -> list[float]:
+    """Spoken length per scene before any audio exists; slightly high so clips are long enough."""
+    wps = script_svc.WPM[language] / 60
+    return [max(2.0, len(sc.narration.split()) / wps * 1.1) for sc in scenes]
+
+
+async def _gather_or_cancel_siblings(*coros):
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+def _settle_failure(tr: "Stages") -> None:
+    # The stage that raised is already marked failed; anything still running was only cut short.
+    failed_already = any(st.status == "failed" for st in tr.job.stages)
+    tr.stop_running("cancelled" if failed_already else "failed")
+
+
 def _media_key(scenes) -> list[list[str]]:
     return [[sc.visual_query, sc.media_type] for sc in scenes]
 
@@ -276,36 +305,59 @@ async def _render(job_id: str, cancel: threading.Event) -> None:
         scenes = job.script.scenes
         n = len(scenes)
 
-        _update(job, step="Generating voiceover", progress=2)
-        tr.start("voice")
-        tr.update("voice", done=0, total=n, detail=f"0 of {n} scenes voiced")
-        audio = await tts.synthesize_scenes(
-            scenes, job.settings, work / "audio", model,
-            on_progress=_scaled(job, 2, 25, tr, "voice", "scenes voiced"),
-        )
-        tr.finish("voice", f"{n} scenes voiced, {sum(a.duration for a in audio):.0f}s of audio")
-
+        _update(job, step="Generating voiceover and finding visuals", progress=2)
         manifest = work / "media.json"
-        visuals = _load_media_manifest(manifest, scenes)
-        _update(job, step="Finding visuals", progress=25)
-        tr.start("visuals")
-        if visuals is None:
+        cached = _load_media_manifest(manifest, scenes)
+        fractions = {"voice": 0.0, "visuals": 1.0 if cached else 0.0}
+
+        def progress_for(key: str, noun: str) -> Callable[[int, int], None]:
+            def cb(done: int, total: int) -> None:
+                fractions[key] = done / max(total, 1)
+                job.progress = 2 + int(43 * (fractions["voice"] + fractions["visuals"]) / 2)
+                tr.update(key, done=done, total=total, detail=f"{done} of {total} {noun}")
+
+            return cb
+
+        async def make_audio():
+            tr.start("voice", parallel=True)
+            tr.update("voice", done=0, total=n, detail=f"0 of {n} scenes voiced")
+            try:
+                audio = await tts.synthesize_scenes(
+                    scenes, job.settings, work / "audio", model,
+                    on_progress=progress_for("voice", "scenes voiced"),
+                )
+            except Exception:
+                tr.fail("voice")
+                raise
+            tr.finish("voice", f"{n} scenes voiced, {sum(a.duration for a in audio):.0f}s of audio")
+            return audio
+
+        async def make_visuals():
+            tr.start("visuals", parallel=True)
+            if cached is not None:
+                tr.finish("visuals", f"Reused {n} clips from the previous run")
+                return cached
             tr.update("visuals", done=0, total=n, detail=f"0 of {n} scenes matched")
-            visuals = await media.fetch_media(
-                scenes,
-                [a.duration for a in audio],
-                job.settings,
-                work / "media",
-                on_progress=_scaled(job, 25, 45, tr, "visuals", "scenes matched"),
-            )
+            try:
+                got = await media.fetch_media(
+                    scenes,
+                    _estimated_durations(scenes, job.settings.language),
+                    job.settings,
+                    work / "media",
+                    on_progress=progress_for("visuals", "scenes matched"),
+                )
+            except Exception:
+                tr.fail("visuals")
+                raise
             work.mkdir(parents=True, exist_ok=True)
             manifest.write_text(
-                json.dumps({"key": _media_key(scenes), "items": [m.model_dump() for m in visuals]})
+                json.dumps({"key": _media_key(scenes), "items": [m.model_dump() for m in got]})
             )
-            clips = sum(1 for v in visuals if v.kind == "video")
+            clips = sum(1 for v in got if v.kind == "video")
             tr.finish("visuals", f"{clips} video clips, {n - clips} images")
-        else:
-            tr.finish("visuals", f"Reused {n} clips from the previous run")
+            return got
+
+        audio, visuals = await _gather_or_cancel_siblings(make_audio(), make_visuals())
 
         _update(job, step="Rendering video", progress=45)
         tr.start("clips", "Preparing scene clips")
@@ -352,11 +404,11 @@ async def _render(job_id: str, cancel: threading.Event) -> None:
         _finish_cancelled(job)
     except tts.VoiceUnavailableError as exc:
         log.warning("voice unavailable for %s: %s", job_id, exc)
-        tr.stop_running("failed")
+        _settle_failure(tr)
         _update(job, status="script_ready", step="Voice unavailable", progress=0, error=str(exc))
     except Exception as exc:
         log.exception("render failed for %s", job_id)
-        tr.stop_running("failed")
+        _settle_failure(tr)
         _update(job, status="failed", step="Render failed", error=str(exc))
 
 

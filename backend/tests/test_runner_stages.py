@@ -110,13 +110,13 @@ def test_render_reports_every_stage_and_finishes(monkeypatch):
     assert all(s.started_at and s.finished_at for s in job.stages)
 
 
-def test_stage_order_is_never_out_of_sequence(monkeypatch):
+def test_stage_order_only_overlaps_voice_and_visuals(monkeypatch):
     patch_fast_pipeline(monkeypatch)
     seen = []
     real_save = store.save
 
     def spy(job):
-        seen.append([s.status for s in job.stages])
+        seen.append({s.key: s.status for s in job.stages})
         real_save(job)
 
     monkeypatch.setattr(store, "save", spy)
@@ -126,12 +126,15 @@ def test_stage_order_is_never_out_of_sequence(monkeypatch):
         await wait_until(lambda: store.get("job1").status == "done")
 
     asyncio.run(main())
-    for snapshot in seen:
-        assert snapshot.count("running") <= 1
-        running = snapshot.index("running") if "running" in snapshot else None
-        if running is not None:
-            assert all(s == "done" for s in snapshot[:running])
-            assert all(s == "pending" for s in snapshot[running + 1:])
+    later = ["clips", "merge", "finish", "seo"]
+    snapshots = [snap for snap in seen if snap]
+    assert snapshots
+    for snap in snapshots:
+        if snap["voice"] != "done" or snap["visuals"] != "done":
+            assert all(snap[k] == "pending" for k in later)
+        for prev, nxt in zip(later, later[1:]):
+            if snap[nxt] != "pending":
+                assert snap[prev] == "done"
 
 
 def test_cancel_during_voiceover_returns_to_script_screen(monkeypatch):
@@ -152,7 +155,7 @@ def test_cancel_during_voiceover_returns_to_script_screen(monkeypatch):
     assert job.status == "script_ready" and job.step == "Stopped"
     assert "stopped" in job.error and job.script is not None
     assert stage_status("job1") == {
-        "voice": "cancelled", "visuals": "pending", "clips": "pending",
+        "voice": "cancelled", "visuals": "done", "clips": "pending",
         "merge": "pending", "finish": "pending", "seo": "pending",
     }
 
@@ -287,3 +290,123 @@ def test_cancel_endpoint_rules(monkeypatch):
         assert client.post("/api/jobs/nope/cancel").status_code == 404
         r = client.post("/api/jobs/finished/cancel")
         assert r.status_code == 409 and "Nothing to stop" in r.json()["detail"]
+
+
+def test_voice_and_visuals_run_at_the_same_time(monkeypatch):
+    voice_started, visuals_started = asyncio.Event(), asyncio.Event()
+
+    async def voice(scenes, cfg, out_dir, model, on_progress=None):
+        voice_started.set()
+        await asyncio.wait_for(visuals_started.wait(), 3)  # only possible if visuals started too
+        on_progress(len(scenes), len(scenes))
+        return [SceneAudio(path="a.mp3", duration=3.0) for _ in scenes]
+
+    async def visuals(scenes, durations, cfg, out_dir, on_progress=None):
+        visuals_started.set()
+        await asyncio.wait_for(voice_started.wait(), 3)
+        on_progress(len(scenes), len(scenes))
+        return [SceneMedia(path="v.mp4", kind="video") for _ in scenes]
+
+    patch_fast_pipeline(monkeypatch, voice=voice, visuals=visuals)
+
+    async def main():
+        runner.start_render(make_job(), RenderRequest())
+        await wait_until(lambda: store.get("job1").status == "done")
+
+    asyncio.run(main())
+    assert store.get("job1").status == "done"
+
+
+def test_visuals_are_chosen_from_estimated_lengths_not_audio(monkeypatch):
+    seen = {}
+
+    async def visuals(scenes, durations, cfg, out_dir, on_progress=None):
+        seen["durations"] = list(durations)
+        on_progress(len(scenes), len(scenes))
+        return [SceneMedia(path="v.mp4", kind="video") for _ in scenes]
+
+    patch_fast_pipeline(monkeypatch, visuals=visuals)
+
+    async def main():
+        runner.start_render(make_job(), RenderRequest())
+        await wait_until(lambda: store.get("job1").status == "done")
+
+    asyncio.run(main())
+    assert seen["durations"] == runner._estimated_durations(SCRIPT.scenes, "english")
+    assert all(d >= 2.0 for d in seen["durations"]) and 3.0 not in seen["durations"]
+
+
+def test_estimated_durations_follow_the_language_speed():
+    scenes = [Scene(narration=" ".join(["word"] * 26), visual_query="x")]
+    english = runner._estimated_durations(scenes, "english")[0]
+    hinglish = runner._estimated_durations(scenes, "hinglish")[0]
+    assert round(english, 1) == round(26 / 2.5 * 1.1, 1)
+    assert hinglish > english
+
+
+def test_voice_failure_cancels_the_visuals_download_and_marks_stages(monkeypatch):
+    cancelled = {}
+
+    async def broken_voice(scenes, cfg, out_dir, model, on_progress=None):
+        await asyncio.sleep(0.05)
+        raise tts.VoiceUnavailableError("voice is down")
+
+    async def slow_visuals(scenes, durations, cfg, out_dir, on_progress=None):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled["yes"] = True
+            raise
+
+    patch_fast_pipeline(monkeypatch, voice=broken_voice, visuals=slow_visuals)
+
+    async def main():
+        runner.start_render(make_job(), RenderRequest())
+        await wait_until(lambda: store.get("job1").status != "rendering")
+
+    asyncio.run(main())
+    job = store.get("job1")
+    assert job.status == "script_ready" and job.step == "Voice unavailable"
+    assert cancelled.get("yes") is True
+    assert stage_status("job1")["voice"] == "failed"
+    assert stage_status("job1")["visuals"] == "cancelled"
+
+
+def test_visuals_failure_does_not_blame_the_voice_stage(monkeypatch):
+    async def slow_voice(scenes, cfg, out_dir, model, on_progress=None):
+        await asyncio.sleep(30)
+
+    async def broken_visuals(scenes, durations, cfg, out_dir, on_progress=None):
+        await asyncio.sleep(0.05)
+        raise RuntimeError("pexels down")
+
+    patch_fast_pipeline(monkeypatch, voice=slow_voice, visuals=broken_visuals)
+
+    async def main():
+        runner.start_render(make_job(), RenderRequest())
+        await wait_until(lambda: store.get("job1").status != "rendering")
+
+    asyncio.run(main())
+    job = store.get("job1")
+    assert job.status == "failed" and "pexels down" in job.error
+    assert stage_status("job1")["visuals"] == "failed"
+    assert stage_status("job1")["voice"] == "cancelled"
+
+
+def test_progress_combines_both_steps_and_never_goes_backwards(monkeypatch):
+    seen = []
+    real_save = store.save
+
+    def spy(job):
+        seen.append(job.progress)
+        real_save(job)
+
+    monkeypatch.setattr(store, "save", spy)
+    patch_fast_pipeline(monkeypatch)
+
+    async def main():
+        runner.start_render(make_job(), RenderRequest())
+        await wait_until(lambda: store.get("job1").status == "done")
+
+    asyncio.run(main())
+    assert seen == sorted(seen) and seen[-1] == 100

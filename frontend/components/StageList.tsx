@@ -113,11 +113,20 @@ function rightText(st: Stage, now: number): string {
 }
 
 function summaryLine(stages: Stage[]): string {
-  const idx = stages.findIndex((s) => s.status === "running");
-  if (idx >= 0) {
-    const st = stages[idx];
+  const running = stages.filter((s) => s.status === "running");
+  if (running.length === 1) {
+    const st = running[0];
     const extra = countText(st);
-    return `Step ${idx + 1} of ${stages.length} · ${st.label}${extra ? ` · ${extra}` : ""}`;
+    return `Step ${stages.indexOf(st) + 1} of ${stages.length} · ${st.label}${extra ? ` · ${extra}` : ""}`;
+  }
+  if (running.length > 1) {
+    const first = stages.indexOf(running[0]) + 1;
+    const last = stages.indexOf(running[running.length - 1]) + 1;
+    const parts = running.map((st) => {
+      const extra = countText(st);
+      return `${st.label}${extra ? ` (${extra})` : ""}`;
+    });
+    return `Steps ${first}–${last} of ${stages.length} · ${parts.join(" + ")}`;
   }
   const failed = stages.find((s) => s.status === "failed");
   if (failed) return `Failed at ${failed.label}`;
@@ -243,8 +252,10 @@ export function StageList({ stages, mode = "live" }: { stages: Stage[]; mode?: "
     );
   }
 
-  const running = stages.find((s) => s.status === "running");
-  const announce = running ? `${running.label}, step ${stages.indexOf(running) + 1} of ${stages.length}` : summaryLine(stages);
+  const runningNow = stages.filter((s) => s.status === "running");
+  const announce = runningNow.length
+    ? `${runningNow.map((s) => s.label).join(" and ")}, step ${stages.indexOf(runningNow[0]) + 1} of ${stages.length}`
+    : summaryLine(stages);
 
   return (
     <div>
