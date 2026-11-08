@@ -7,8 +7,9 @@ Language = Literal["english", "hinglish"]
 VoiceGender = Literal["male", "female"]
 MediaType = Literal["video", "image"]
 JobStatus = Literal[
-    "scripting", "script_ready", "rendering", "done", "failed"
+    "scripting", "script_ready", "rendering", "done", "failed", "cancelled"
 ]
+StageStatus = Literal["pending", "running", "done", "failed", "cancelled"]
 
 
 class JobSettings(BaseModel):
@@ -125,6 +126,18 @@ class VoicePreviewRequest(BaseModel):
     language: Language = "english"
 
 
+class Stage(BaseModel):
+    key: str  # research|script|voice|visuals|clips|merge|finish|seo
+    label: str
+    status: StageStatus = "pending"
+    done: int = 0  # finished units (scenes) when total > 0
+    total: int = 0  # 0 = no countable unit
+    percent: int = 0  # 0-100 progress inside this stage
+    detail: str = ""  # short human text, e.g. "5 of 8 scenes voiced"
+    started_at: Optional[str] = None  # ISO timestamps
+    finished_at: Optional[str] = None
+
+
 class Job(BaseModel):
     id: str
     topic: str
@@ -134,6 +147,7 @@ class Job(BaseModel):
     status: JobStatus
     step: str = ""
     progress: int = 0  # 0-100
+    stages: list[Stage] = Field(default_factory=list)  # checklist of the current/last run
     script: Optional[Script] = None
     research: Optional[Research] = None
     seo: Optional[Seo] = None

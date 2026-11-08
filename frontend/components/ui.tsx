@@ -122,7 +122,7 @@ export function StatusBadge({ status }: { status: string }) {
     }[status] ?? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
   return (
     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${color}`}>
-      {status.replace("_", " ")}
+      {status === "cancelled" ? "stopped" : status.replace("_", " ")}
     </span>
   );
 }

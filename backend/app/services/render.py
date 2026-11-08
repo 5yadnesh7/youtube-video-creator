@@ -35,17 +35,28 @@ KEN_BURNS = ["zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down
 _TIME_RE = re.compile(r"^out_time_(?:us|ms)=(\d+)")
 
 
+class RenderCancelled(Exception):
+    pass
+
+
 def _run_ffmpeg(
     args: list[str],
     expected_seconds: float,
     log_path: Path,
     on_fraction: Callable[[float], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> None:
+    if cancel is not None and cancel.is_set():
+        raise RenderCancelled()
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", *args]
     with open(log_path, "wb") as err:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
         assert proc.stdout is not None
         for line in proc.stdout:
+            if cancel is not None and cancel.is_set():
+                proc.kill()
+                proc.wait()
+                raise RenderCancelled()
             m = _TIME_RE.match(line.strip())
             if m and on_fraction and expected_seconds > 0:
                 on_fraction(min(1.0, int(m.group(1)) / 1e6 / expected_seconds))
@@ -92,6 +103,7 @@ def _render_scene(
     out: Path,
     work_dir: Path,
     on_fraction: Callable[[float], None],
+    cancel: threading.Event | None = None,
 ) -> None:
     frames = max(2, math.ceil(length * FPS))
     is_image = media.kind == "image" or Path(media.path).suffix.lower() in IMAGE_EXTS
@@ -106,7 +118,7 @@ def _render_scene(
             f"setsar=1,fps={FPS},setpts=PTS-STARTPTS,format=yuv420p"
         )
         args = ["-stream_loop", "-1", "-i", media.path, "-t", f"{length:.3f}", "-vf", vf, *enc]
-    _run_ffmpeg(args, length, work_dir / f"scene_{idx:03d}.log", on_fraction)
+    _run_ffmpeg(args, length, work_dir / f"scene_{idx:03d}.log", on_fraction, cancel)
 
 
 def _write_script(path: Path, text: str) -> Path:
@@ -122,6 +134,7 @@ def render_video(
     work_dir: Path,
     on_progress: Callable[[int], None] | None = None,
     music_path: Optional[Path] = None,  # optional background music hook, mixed ~-20dB under voice
+    cancel: threading.Event | None = None,  # set to abort: running ffmpeg is killed, RenderCancelled raised
 ) -> list[float]:
     if not audio or len(audio) != len(media):
         raise ValueError(f"need equal, non-empty audio/media lists (got {len(audio)}/{len(media)})")
@@ -168,7 +181,7 @@ def render_video(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [
             pool.submit(_render_scene, i, media[i], lengths[i], w, h, clips[i], work_dir,
-                        lambda f, i=i: scene_frac(i, f))
+                        lambda f, i=i: scene_frac(i, f), cancel)
             for i in range(n)
         ]
         for f in futs:
@@ -200,7 +213,7 @@ def render_video(
         [*inputs, "-filter_complex_script", str(vscript), "-map", "[vout]", "-an",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
          "-r", str(FPS), "-t", f"{total:.3f}", str(joined)],
-        total, work_dir / "join.log", lambda f: report(50 + 42 * f),
+        total, work_dir / "join.log", lambda f: report(50 + 42 * f), cancel,
     )
     report(92)
 
@@ -228,14 +241,19 @@ def render_video(
     _run_ffmpeg(
         [*a_inputs, "-filter_complex_script", str(ascript), "-map", "[aout]",
          "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{total:.3f}", str(audio_out)],
-        total, work_dir / "audio.log", lambda f: report(92 + 5 * f),
+        total, work_dir / "audio.log", lambda f: report(92 + 5 * f), cancel=cancel,
     )
 
-    _run_ffmpeg(
-        ["-i", str(joined), "-i", str(audio_out), "-map", "0:v", "-map", "1:a",
-         "-c", "copy", "-movflags", "+faststart", "-t", f"{total:.3f}", str(out_path)],
-        total, work_dir / "mux.log",
-    )
+    part = out_path.with_name(out_path.stem + ".part.mp4")
+    try:
+        _run_ffmpeg(
+            ["-i", str(joined), "-i", str(audio_out), "-map", "0:v", "-map", "1:a",
+             "-c", "copy", "-movflags", "+faststart", "-t", f"{total:.3f}", str(part)],
+            total, work_dir / "mux.log", cancel=cancel,
+        )
+        part.replace(out_path)
+    finally:
+        part.unlink(missing_ok=True)
     report(100)
 
     for p in [*clips, joined, audio_out]:

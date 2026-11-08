@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, errorMessage } from "@/lib/api";
+import { ApiError, api, errorMessage } from "@/lib/api";
 import { usePolling } from "@/lib/usePolling";
-import type { Job, JobStatus, Script } from "@/lib/types";
+import type { Job, JobStatus, Script, Stage } from "@/lib/types";
+import { StageList } from "./StageList";
 import { FOCUS, FormatChip, ResultView, StatusPill } from "./ResultView";
 import { ScriptEditor } from "./ScriptEditor";
 import { Button, Card, ErrorBox, Skeleton, Spinner } from "./ui";
@@ -125,7 +126,115 @@ function FailedCard({
   );
 }
 
-function RenderProgress({ step, progress }: { step: string; progress: number }) {
+function StopControl({
+  jobId,
+  onUpdated,
+  onRefresh,
+}: {
+  jobId: string;
+  onUpdated: (j: Job) => void;
+  onRefresh: () => void;
+}) {
+  const [phase, setPhase] = useState<"idle" | "confirm" | "stopping">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  const stopRef = useRef<HTMLButtonElement>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const prev = useRef(phase);
+
+  useEffect(() => {
+    if (phase === "confirm") keepRef.current?.focus();
+    else if (phase === "idle" && prev.current === "confirm") stopRef.current?.focus();
+    prev.current = phase;
+  }, [phase]);
+
+  const confirm = async () => {
+    setPhase("stopping");
+    setErr(null);
+    try {
+      onUpdated(await api.cancelJob(jobId));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        onRefresh();
+      } else {
+        setErr(errorMessage(e));
+      }
+      setPhase("idle");
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex min-h-11 flex-wrap items-center gap-2">
+        {phase === "idle" && (
+          <button
+            ref={stopRef}
+            type="button"
+            onClick={() => setPhase("confirm")}
+            className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-700 px-4 text-sm font-medium text-red-800 hover:bg-red-50 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-950/40 ${FOCUS}`}
+          >
+            <svg aria-hidden viewBox="0 0 20 20" className="h-4 w-4 fill-current">
+              <rect x="4" y="4" width="12" height="12" rx="2" />
+            </svg>
+            Stop generation
+          </button>
+        )}
+        {phase === "confirm" && (
+          <div role="group" aria-label="Confirm stop" className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">Stop generating?</span>
+            <button
+              type="button"
+              onClick={confirm}
+              className={`inline-flex min-h-11 items-center justify-center rounded-lg bg-red-700 px-4 text-sm font-medium text-white hover:bg-red-800 ${FOCUS}`}
+            >
+              Yes, stop
+            </button>
+            <button
+              ref={keepRef}
+              type="button"
+              onClick={() => setPhase("idle")}
+              className={`inline-flex min-h-11 items-center justify-center rounded-lg border border-zinc-400 px-4 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800 ${FOCUS}`}
+            >
+              Keep going
+            </button>
+          </div>
+        )}
+        {phase === "stopping" && (
+          <button
+            type="button"
+            disabled
+            aria-busy="true"
+            className="inline-flex min-h-11 cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-zinc-400 px-4 text-sm font-medium opacity-70 dark:border-zinc-600"
+          >
+            <Spinner className="h-3.5 w-3.5 motion-reduce:animate-none" />
+            Stopping…
+          </button>
+        )}
+      </div>
+      <p role="status" aria-live="polite" className="sr-only">
+        {phase === "stopping" ? "Stopping generation" : ""}
+      </p>
+      {err && (
+        <p role="alert" className="text-sm text-red-700 dark:text-red-400">
+          Could not stop: {err}
+        </p>
+      )}
+    </div>
+  );
+}
+
+type StopProps = { jobId: string; onUpdated: (j: Job) => void; onRefresh: () => void };
+
+function RenderProgress({
+  step,
+  progress,
+  stages,
+  stop,
+}: {
+  step: string;
+  progress: number;
+  stages: Stage[];
+  stop: StopProps;
+}) {
   const elapsed = useElapsed();
   const [announce, setAnnounce] = useState("");
   const last = useRef({ step: "", bucket: -1 });
@@ -160,7 +269,8 @@ function RenderProgress({ step, progress }: { step: string; progress: number }) 
           style={{ width: `${Math.max(2, progress)}%` }}
         />
       </div>
-      <p className="text-sm text-zinc-700 dark:text-zinc-300">{stepHint(name)}</p>
+      <StageList stages={stages} />
+      {stages.length === 0 && <p className="text-sm text-zinc-700 dark:text-zinc-300">{stepHint(name)}</p>}
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
         Elapsed {fmtElapsed(elapsed)}. This can take a few minutes. You can leave and come back from{" "}
         <Link href="/videos" className={`rounded underline ${FOCUS}`}>
@@ -168,6 +278,7 @@ function RenderProgress({ step, progress }: { step: string; progress: number }) 
         </Link>
         .
       </p>
+      <StopControl {...stop} />
       <p role="status" aria-live="polite" className="sr-only">
         {announce}
       </p>
@@ -175,7 +286,7 @@ function RenderProgress({ step, progress }: { step: string; progress: number }) 
   );
 }
 
-function ScriptingProgress({ step }: { step: string }) {
+function ScriptingProgress({ step, stages: live, stop }: { step: string; stages: Stage[]; stop: StopProps }) {
   const elapsed = useElapsed();
   const researching = !/writing/i.test(step);
   const stages = [
@@ -188,6 +299,8 @@ function ScriptingProgress({ step }: { step: string }) {
         <Spinner className="motion-reduce:animate-none" />
         <p className="text-lg font-semibold">{step || "Researching topic"}</p>
       </div>
+      <StageList stages={live} />
+      {live.length === 0 && (
       <ol className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         {stages.map((st) => (
           <li
@@ -207,17 +320,21 @@ function ScriptingProgress({ step }: { step: string }) {
           </li>
         ))}
       </ol>
+      )}
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
         Research can take up to about a minute. Elapsed {fmtElapsed(elapsed)}.
       </p>
+      <StopControl {...stop} />
       <div aria-hidden className="space-y-3">
         <Skeleton className="h-10 motion-reduce:animate-none" />
         <Skeleton className="h-24 motion-reduce:animate-none" />
         <Skeleton className="h-24 motion-reduce:animate-none" />
       </div>
-      <p role="status" aria-live="polite" className="sr-only">
-        {researching ? "Researching the topic" : "Writing the script"}
-      </p>
+      {live.length === 0 && (
+        <p role="status" aria-live="polite" className="sr-only">
+          {researching ? "Researching the topic" : "Writing the script"}
+        </p>
+      )}
     </Card>
   );
 }
@@ -289,13 +406,47 @@ export function JobView({
 
   const retryScript = () => run(() => api.regenerateScript(job.id));
   const doRender = () => run(() => api.render(job.id));
+  const stop: StopProps = { jobId: job.id, onUpdated: set, onRefresh: () => void refresh() };
+
+  if (job.status === "cancelled") {
+    return (
+      <div>
+        {header}
+        {actionErr}
+        <Card className="space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">Generation stopped</h2>
+            <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">No script was saved.</p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+            <Button disabled={busy} onClick={retryScript} className={`min-h-11 ${FOCUS}`}>
+              {busy && <Spinner className="h-3.5 w-3.5 motion-reduce:animate-none" />}
+              {busy ? "Starting…" : "Try again"}
+            </Button>
+            {onNew ? (
+              <Button variant="secondary" onClick={onNew} className={`min-h-11 !border-zinc-400 dark:!border-zinc-600 ${FOCUS}`}>
+                Start over
+              </Button>
+            ) : (
+              <Link
+                href="/"
+                className={`inline-flex min-h-11 items-center justify-center rounded-lg border border-zinc-400 px-4 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800 ${FOCUS}`}
+              >
+                Start over
+              </Link>
+            )}
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   if (job.status === "scripting") {
     return (
       <div>
         {header}
         {pollErr}
-        <ScriptingProgress step={job.step} />
+        <ScriptingProgress step={job.step} stages={job.stages ?? []} stop={stop} />
       </div>
     );
   }
@@ -305,7 +456,16 @@ export function JobView({
       <div>
         {header}
         {actionErr}
-        {job.error && (
+        {job.error && job.step === "Stopped" ? (
+          <div
+            role="status"
+            className="mb-4 rounded-xl border border-zinc-300 bg-zinc-100 p-4 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-100"
+          >
+            <p className="font-semibold">Generation stopped</p>
+            <p className="mt-1 [overflow-wrap:anywhere]">{job.error}</p>
+            <p className="mt-2">Your script is saved — change anything and generate again.</p>
+          </div>
+        ) : job.error ? (
           <div
             role="alert"
             className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
@@ -317,7 +477,7 @@ export function JobView({
               were already voiced are reused when you keep the same voice.
             </p>
           </div>
-        )}
+        ) : null}
         <ScriptEditor
           key={`${job.id}-${job.script.title}-${job.script.scenes.length}-${job.script.hook}`}
           initial={job.script}
@@ -344,7 +504,7 @@ export function JobView({
       <div>
         {header}
         {pollErr}
-        <RenderProgress step={job.step} progress={job.progress} />
+        <RenderProgress step={job.step} progress={job.progress} stages={job.stages ?? []} stop={stop} />
       </div>
     );
   }

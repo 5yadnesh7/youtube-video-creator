@@ -6,8 +6,10 @@ from pydantic import ValidationError
 from app.schemas import JobSettings, Research, Scene, Script
 from app.services.openrouter import chat_json, chat_text
 
-WPM = {"english": 150, "hinglish": 140}
-TOLERANCE = 0.25
+# Measured from real voices: edge/HeyGen speak English at ~141-151 wpm and Hinglish at ~128-137 wpm.
+WPM = {"english": 150, "hinglish": 130}
+TOLERANCE = 0.12
+SCENE_TOLERANCE = 0.35
 MAX_ATTEMPTS = 3
 
 
@@ -119,7 +121,7 @@ def _within(value: int, target: int, tol: float = TOLERANCE) -> bool:
 
 def _clamp(script: Script, words: int, scenes: int) -> Script:
     out = list(script.scenes)
-    max_scenes = round(scenes * (1 + TOLERANCE))
+    max_scenes = round(scenes * (1 + SCENE_TOLERANCE))
     if len(out) > max_scenes:
         out = out[: max_scenes - 1] + [out[-1]]
     max_words = round(words * (1 + TOLERANCE))
@@ -164,7 +166,7 @@ async def generate_script(
             continue
         w = sum(_words(s.narration) for s in script.scenes)
         n = len(script.scenes)
-        if _within(w, words) and _within(n, scenes, 0.35):
+        if _within(w, words) and _within(n, scenes, SCENE_TOLERANCE):
             return script
         score = abs(w - words) / words + abs(n - scenes) / scenes
         if score < best_score:

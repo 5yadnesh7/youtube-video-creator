@@ -102,6 +102,7 @@ export const api = {
   regenerateScript: (id: string) => request<Job>(`${jobPath(id)}/script/regenerate`, send("POST")),
   render: (id: string, body?: RenderRequest) =>
     request<Job>(`${jobPath(id)}/render`, send("POST", body)),
+  cancelJob: (id: string) => request<Job>(`${jobPath(id)}/cancel`, send("POST")),
   getVoices: (language: Language) =>
     request<VoicesResponse>(`/api/voices?language=${encodeURIComponent(language)}`),
   previewVoice: async (voice_id: string, language: Language): Promise<Blob> => {

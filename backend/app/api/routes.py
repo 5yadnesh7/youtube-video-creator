@@ -93,6 +93,14 @@ async def render_job(job_id: str, req: Optional[RenderRequest] = None) -> Job:
     return runner.start_render(job, req)
 
 
+@router.post("/jobs/{job_id}/cancel", response_model=Job)
+async def cancel_job(job_id: str) -> Job:
+    job = _job_or_404(job_id)
+    if job.status not in ("scripting", "rendering"):
+        raise HTTPException(409, f"Nothing to stop: the job is {job.status}")
+    return runner.cancel(job)
+
+
 @router.get("/voices", response_model=VoicesResponse)
 async def voices(language: Language = "english", gender: VoiceGender = "male") -> VoicesResponse:
     return VoicesResponse(

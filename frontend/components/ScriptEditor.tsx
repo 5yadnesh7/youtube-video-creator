@@ -25,7 +25,8 @@ function saveVoice(language: Language, id: string) {
   }
 }
 
-const WORDS_PER_SECOND = 2.5;
+// Measured speaking rates of the voices: English ~2.5 words/s, Hinglish ~2.2 words/s.
+const WORDS_PER_SECOND: Record<Language, number> = { english: 2.5, hinglish: 2.2 };
 
 export function countWords(s: string): number {
   return s.trim() ? s.trim().split(/\s+/).length : 0;
@@ -224,16 +225,17 @@ export function ScriptEditor({
   }, [confirming]);
 
   const words = scriptWords(script);
-  const est = words / WORDS_PER_SECOND;
-  const targetWords = Math.round(targetSeconds * WORDS_PER_SECOND);
+  const wps = WORDS_PER_SECOND[language];
+  const est = words / wps;
+  const targetWords = Math.round(targetSeconds * wps);
   const ratio = est / targetSeconds;
-  const offTarget = ratio > 1.15 || ratio < 0.8;
+  const offTarget = ratio > 1.1 || ratio < 0.9;
   const delta = Math.abs(targetWords - words);
   const dirty = JSON.stringify(script) !== JSON.stringify(initial);
 
   const summary = `${words} words, about ${formatDuration(est)} spoken. ${
     offTarget
-      ? ratio < 0.8
+      ? ratio < 0.9
         ? `Add about ${delta} words to reach the target.`
         : `Remove about ${delta} words to reach the target.`
       : "On target."
@@ -281,7 +283,7 @@ export function ScriptEditor({
           {offTarget ? (
             <span className="inline-flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
               <WarnIcon />
-              {ratio < 0.8
+              {ratio < 0.9
                 ? `Add about ${delta} words to reach the target`
                 : `Remove about ${delta} words to reach the target`}
             </span>

@@ -137,6 +137,7 @@ function JobViewWithStage({
 }) {
   const handleStatus = useCallback(
     (s: JobStatus) => onStage(s === "rendering" ? 3 : s === "done" ? 4 : 2),
+    // cancelled/failed/script_ready all stay on the Script step
     [onStage],
   );
   return <JobView jobId={jobId} onNew={onNew} onStatusChange={handleStatus} />;

@@ -6,6 +6,7 @@ import { api, errorMessage } from "@/lib/api";
 import type { Job, Seo, VoicesResponse } from "@/lib/types";
 import { SourcesList } from "./ResearchPanel";
 import { Button, Card, Spinner } from "./ui";
+import { StageList } from "./StageList";
 import { VoicePicker } from "./VoicePicker";
 
 export const FOCUS =
@@ -27,6 +28,11 @@ const STATUS_META: Record<string, { label: string; icon: string; cls: string }> 
     label: "Writing script",
     icon: "✎",
     cls: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300",
+  },
+  cancelled: {
+    label: "Stopped",
+    icon: "■",
+    cls: "bg-zinc-200 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200",
   },
   script_ready: {
     label: "Script ready",
@@ -290,6 +296,7 @@ export function ResultView({
         ) : (
           <Card className="text-sm text-zinc-600 dark:text-zinc-400">No SEO metadata available for this video.</Card>
         )}
+        {job.stages && job.stages.length > 0 && <StageList stages={job.stages} mode="summary" />}
         {sources.length > 0 && (
           <Card className="min-w-0 space-y-3">
             <div className="flex items-center justify-between gap-2">

@@ -2,7 +2,20 @@ export type VideoFormat = "vertical" | "horizontal";
 export type Language = "english" | "hinglish";
 export type VoiceGender = "male" | "female";
 export type MediaType = "video" | "image";
-export type JobStatus = "scripting" | "script_ready" | "rendering" | "done" | "failed";
+export type JobStatus = "scripting" | "script_ready" | "rendering" | "done" | "failed" | "cancelled";
+export type StageStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+export interface Stage {
+  key: string;
+  label: string;
+  status: StageStatus;
+  done: number;
+  total: number;
+  percent: number;
+  detail: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
 
 export interface JobSettings {
   format: VideoFormat;
@@ -90,6 +103,7 @@ export interface Job {
   status: JobStatus;
   step: string;
   progress: number;
+  stages?: Stage[];
   script?: Script | null;
   seo?: Seo | null;
   research?: Research | null;

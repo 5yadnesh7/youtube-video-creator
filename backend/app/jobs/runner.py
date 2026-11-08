@@ -2,13 +2,15 @@ import asyncio
 import json
 import logging
 import shutil
+import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Callable
 
 from app.config import settings
 from app.jobs import store
-from app.schemas import CreateJobRequest, Job, RenderRequest, Research, SceneMedia, Script
+from app.schemas import CreateJobRequest, Job, RenderRequest, Research, SceneMedia, Script, Stage
 from app.services import (
     media,
     openrouter,
@@ -21,13 +23,107 @@ from app.services import (
 
 log = logging.getLogger(__name__)
 
-_tasks: set[asyncio.Task] = set()
+SCRIPT_STAGES = [("research", "Researching the topic"), ("script", "Writing the script")]
+RENDER_STAGES = [
+    ("voice", "Generating voiceover"),
+    ("visuals", "Finding visuals"),
+    ("clips", "Rendering scene clips"),
+    ("merge", "Joining scenes with transitions"),
+    ("finish", "Mixing audio and exporting"),
+    ("seo", "Writing title, description and tags"),
+]
+
+# job id -> (running task, flag that tells the render thread to kill ffmpeg)
+_runs: dict[str, tuple[asyncio.Task, threading.Event]] = {}
 
 
-def _spawn(coro: Awaitable) -> None:
-    task = asyncio.ensure_future(coro)
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+def _spawn(job_id: str, make_coro: Callable[[threading.Event], object]) -> None:
+    cancel = threading.Event()
+    task = asyncio.ensure_future(make_coro(cancel))
+    _runs[job_id] = (task, cancel)
+
+    def forget(t: asyncio.Task) -> None:
+        if _runs.get(job_id, (None, None))[0] is t:
+            _runs.pop(job_id, None)
+        if t.cancelled():
+            # Cancelled before its first step ran, so the coroutine's own cleanup never executed.
+            job = store.get(job_id)
+            if job and job.status in ("scripting", "rendering"):
+                _finish_cancelled(job)
+
+    task.add_done_callback(forget)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+class Stages:
+    """Keeps the per-step checklist on a job current; safe to call from the render thread."""
+
+    def __init__(self, job: Job):
+        self.job = job
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def init(job: Job, defs: list[tuple[str, str]]) -> "Stages":
+        job.stages = [Stage(key=k, label=label) for k, label in defs]
+        return Stages(job)
+
+    def _stage(self, key: str) -> Stage:
+        return next(st for st in self.job.stages if st.key == key)
+
+    def start(self, key: str, detail: str = "") -> None:
+        with self._lock:
+            st = self._stage(key)
+            if st.status == "running":
+                return
+            for other in self.job.stages:
+                if other.status == "running":
+                    self._close(other, "done")
+            st.status, st.started_at, st.detail = "running", _now(), detail
+            store.save(self.job)
+
+    def update(self, key: str, *, done: int | None = None, total: int | None = None,
+               percent: int | None = None, detail: str | None = None) -> None:
+        with self._lock:
+            st = self._stage(key)
+            if done is not None:
+                st.done = done
+            if total is not None:
+                st.total = total
+            if percent is not None:
+                st.percent = max(0, min(100, percent))
+            elif st.total:
+                st.percent = int(100 * st.done / st.total)
+            if detail is not None:
+                st.detail = detail
+            store.save(self.job)
+
+    def finish(self, key: str, detail: str | None = None) -> None:
+        with self._lock:
+            st = self._stage(key)
+            if st.started_at is None:
+                st.started_at = _now()
+            if detail is not None:
+                st.detail = detail
+            self._close(st, "done")
+            store.save(self.job)
+
+    def stop_running(self, status: str) -> None:
+        with self._lock:
+            for st in self.job.stages:
+                if st.status == "running":
+                    self._close(st, status)
+            store.save(self.job)
+
+    @staticmethod
+    def _close(st: Stage, status: str) -> None:
+        st.status, st.finished_at = status, _now()
+        if status == "done":
+            st.percent = 100
+            if st.total:
+                st.done = st.total
 
 
 def _update(job: Job, **fields) -> None:
@@ -47,13 +143,20 @@ def create(req: CreateJobRequest) -> Job:
         step="Researching topic",
         created_at=store.now_iso(),
     )
+    Stages.init(job, SCRIPT_STAGES).start("research")
     store.save(job)
-    _spawn(_generate_script(job.id))
+    _spawn(job.id, lambda cancel: _generate_script(job.id))
     return job
 
 
 def regenerate(job: Job) -> Job:
     needs_research = not (job.research and job.research.grounded)
+    tr = Stages.init(job, SCRIPT_STAGES)
+    if needs_research:
+        tr.start("research")
+    else:
+        tr.finish("research", "Reused the earlier research")
+        tr.start("script")
     _update(
         job,
         status="scripting",
@@ -62,16 +165,38 @@ def regenerate(job: Job) -> Job:
         error=None,
         seo=None,
     )
-    _spawn(_generate_script(job.id))
+    _spawn(job.id, lambda cancel: _generate_script(job.id))
     return job
 
 
 def start_render(job: Job, req: RenderRequest) -> Job:
     if req.voice_id:
         job.settings.voice_id = req.voice_id
+    Stages.init(job, RENDER_STAGES).start("voice")
     _update(job, status="rendering", step="Starting", progress=0, error=None)
-    _spawn(_render(job.id))
+    _spawn(job.id, lambda cancel: _render(job.id, cancel))
     return job
+
+
+def cancel(job: Job) -> Job:
+    """Asks the running generation to stop; the run finalises the job itself a moment later."""
+    run = _runs.get(job.id)
+    if run is None:
+        _finish_cancelled(job)  # nothing is actually running (stale state), just settle the job
+        return job
+    task, flag = run
+    flag.set()
+    task.cancel()
+    return job
+
+
+def _finish_cancelled(job: Job) -> None:
+    Stages(job).stop_running("cancelled")
+    if job.script:
+        stopped = "Rendering" if job.status == "rendering" else "Script regeneration"
+        _update(job, status="script_ready", step="Stopped", progress=0, error=f"{stopped} was stopped.")
+    else:
+        _update(job, status="cancelled", step="Stopped", progress=0, error=None)
 
 
 async def _resolve_model(job: Job) -> str:
@@ -82,6 +207,7 @@ async def _generate_script(job_id: str) -> None:
     job = store.get(job_id)
     if not job:
         return
+    tr = Stages(job)
     try:
         model = await _resolve_model(job)
         if not (job.research and job.research.grounded):
@@ -92,20 +218,32 @@ async def _generate_script(job_id: str) -> None:
             except Exception:
                 log.exception("research failed for %s", job_id)
                 research = Research(brief="", grounded=False, notes="Research step crashed")
+            found = len(research.sources)
+            plural = "" if found == 1 else "s"
+            tr.finish("research", f"{found} source{plural} used" if research.grounded else "No sources found")
+            tr.start("script")
             _update(job, research=research, step="Writing script")
         script = await script_svc.generate_script(
             job.topic, job.settings, model, research=job.research
         )
+        tr.finish("script", f"{len(script.scenes)} scenes")
         _update(job, script=script, status="script_ready", step="Script ready", progress=100)
+    except asyncio.CancelledError:
+        _finish_cancelled(job)
     except Exception as exc:
         log.exception("script generation failed for %s", job_id)
+        tr.stop_running("failed")
         _update(job, status="failed", step="Script generation failed", error=str(exc))
 
 
-def _scaled(job: Job, lo: int, hi: int) -> Callable[[int, int], None]:
+def _scaled(job: Job, lo: int, hi: int, tr: Stages | None = None, key: str = "", noun: str = "scenes"
+            ) -> Callable[[int, int], None]:
     def cb(done: int, total: int) -> None:
         job.progress = lo + int((hi - lo) * done / max(total, 1))
-        store.save(job)
+        if tr:
+            tr.update(key, done=done, total=total, detail=f"{done} of {total} {noun}")
+        else:
+            store.save(job)
 
     return cb
 
@@ -126,63 +264,99 @@ def _load_media_manifest(path: Path, scenes) -> list[SceneMedia] | None:
     return items
 
 
-async def _render(job_id: str) -> None:
+async def _render(job_id: str, cancel: threading.Event) -> None:
     job = store.get(job_id)
     if not job or not job.script:
         return
+    tr = Stages(job)
     work = settings.jobs_dir / job_id
     out_path = store.video_path(job_id)
     try:
         model = await _resolve_model(job)
         scenes = job.script.scenes
+        n = len(scenes)
 
         _update(job, step="Generating voiceover", progress=2)
+        tr.start("voice")
+        tr.update("voice", done=0, total=n, detail=f"0 of {n} scenes voiced")
         audio = await tts.synthesize_scenes(
-            scenes, job.settings, work / "audio", model, on_progress=_scaled(job, 2, 25)
+            scenes, job.settings, work / "audio", model,
+            on_progress=_scaled(job, 2, 25, tr, "voice", "scenes voiced"),
         )
+        tr.finish("voice", f"{n} scenes voiced, {sum(a.duration for a in audio):.0f}s of audio")
 
         manifest = work / "media.json"
         visuals = _load_media_manifest(manifest, scenes)
+        _update(job, step="Finding visuals", progress=25)
+        tr.start("visuals")
         if visuals is None:
-            _update(job, step="Finding visuals", progress=25)
+            tr.update("visuals", done=0, total=n, detail=f"0 of {n} scenes matched")
             visuals = await media.fetch_media(
                 scenes,
                 [a.duration for a in audio],
                 job.settings,
                 work / "media",
-                on_progress=_scaled(job, 25, 45),
+                on_progress=_scaled(job, 25, 45, tr, "visuals", "scenes matched"),
             )
+            work.mkdir(parents=True, exist_ok=True)
             manifest.write_text(
                 json.dumps({"key": _media_key(scenes), "items": [m.model_dump() for m in visuals]})
             )
+            clips = sum(1 for v in visuals if v.kind == "video")
+            tr.finish("visuals", f"{clips} video clips, {n - clips} images")
+        else:
+            tr.finish("visuals", f"Reused {n} clips from the previous run")
 
         _update(job, step="Rendering video", progress=45)
+        tr.start("clips", "Preparing scene clips")
         loop = asyncio.get_running_loop()
 
         def on_render(pct: int) -> None:
+            if cancel.is_set():
+                return
             job.progress = 45 + int(pct * 0.5)
-            store.save(job)
+            if pct < 50:
+                tr.start("clips")
+                tr.update("clips", percent=pct * 2, detail=f"{pct * 2}% of scene clips")
+            elif pct < 92:
+                tr.start("merge")
+                tr.update("merge", percent=int((pct - 50) / 42 * 100), detail="Crossfading scenes together")
+            else:
+                tr.start("finish")
+                tr.update("finish", percent=int((pct - 92) / 8 * 100), detail="Normalising audio and saving")
 
         starts = await loop.run_in_executor(
             None,
             lambda: render.render_video(
-                audio, visuals, job.settings, out_path, work / "tmp", on_progress=on_render
+                audio, visuals, job.settings, out_path, work / "tmp",
+                on_progress=on_render, cancel=cancel,
             ),
         )
+        tr.finish("clips", f"{n} scene clips")
+        tr.finish("merge", f"{max(n - 1, 0)} transitions")
+        tr.finish("finish", "Final video saved")
 
         _update(job, step="Writing SEO", progress=96)
+        tr.start("seo")
         try:
             seo = await seo_svc.generate_seo(job.script, job.settings, starts, model)
+            tr.finish("seo")
         except Exception:
             log.exception("SEO generation failed for %s", job_id)
             seo = None
+            tr.finish("seo", "Skipped: could not generate (the video is fine)")
         shutil.rmtree(work / "tmp", ignore_errors=True)
         _update(job, seo=seo, status="done", step="Done", progress=100)
+    except (asyncio.CancelledError, render.RenderCancelled):
+        cancel.set()
+        _finish_cancelled(job)
     except tts.VoiceUnavailableError as exc:
         log.warning("voice unavailable for %s: %s", job_id, exc)
+        tr.stop_running("failed")
         _update(job, status="script_ready", step="Voice unavailable", progress=0, error=str(exc))
     except Exception as exc:
         log.exception("render failed for %s", job_id)
+        tr.stop_running("failed")
         _update(job, status="failed", step="Render failed", error=str(exc))
 
 
