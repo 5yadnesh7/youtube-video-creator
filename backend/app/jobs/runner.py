@@ -70,7 +70,7 @@ def start_render(job: Job, req: RenderRequest) -> Job:
     if req.voice_id:
         job.settings.voice_id = req.voice_id
     _update(job, status="rendering", step="Starting", progress=0, error=None)
-    _spawn(_render(job.id, req.reuse_media))
+    _spawn(_render(job.id))
     return job
 
 
@@ -110,17 +110,23 @@ def _scaled(job: Job, lo: int, hi: int) -> Callable[[int, int], None]:
     return cb
 
 
-def _load_media_manifest(path: Path, count: int) -> list[SceneMedia] | None:
+def _media_key(scenes) -> list[list[str]]:
+    return [[sc.visual_query, sc.media_type] for sc in scenes]
+
+
+def _load_media_manifest(path: Path, scenes) -> list[SceneMedia] | None:
     try:
-        items = [SceneMedia.model_validate(m) for m in json.loads(path.read_text())]
-    except (OSError, ValueError):
+        data = json.loads(path.read_text())
+        items = [SceneMedia.model_validate(m) for m in data["items"]]
+        same_scenes = data["key"] == _media_key(scenes)
+    except (OSError, ValueError, KeyError, TypeError):
         return None
-    if len(items) != count or not all(Path(m.path).exists() for m in items):
+    if not same_scenes or len(items) != len(scenes) or not all(Path(m.path).exists() for m in items):
         return None
     return items
 
 
-async def _render(job_id: str, reuse_media: bool = False) -> None:
+async def _render(job_id: str) -> None:
     job = store.get(job_id)
     if not job or not job.script:
         return
@@ -136,7 +142,7 @@ async def _render(job_id: str, reuse_media: bool = False) -> None:
         )
 
         manifest = work / "media.json"
-        visuals = _load_media_manifest(manifest, len(scenes)) if reuse_media else None
+        visuals = _load_media_manifest(manifest, scenes)
         if visuals is None:
             _update(job, step="Finding visuals", progress=25)
             visuals = await media.fetch_media(
@@ -146,7 +152,9 @@ async def _render(job_id: str, reuse_media: bool = False) -> None:
                 work / "media",
                 on_progress=_scaled(job, 25, 45),
             )
-            manifest.write_text(json.dumps([m.model_dump() for m in visuals]))
+            manifest.write_text(
+                json.dumps({"key": _media_key(scenes), "items": [m.model_dump() for m in visuals]})
+            )
 
         _update(job, step="Rendering video", progress=45)
         loop = asyncio.get_running_loop()
@@ -170,6 +178,9 @@ async def _render(job_id: str, reuse_media: bool = False) -> None:
             seo = None
         shutil.rmtree(work / "tmp", ignore_errors=True)
         _update(job, seo=seo, status="done", step="Done", progress=100)
+    except tts.VoiceUnavailableError as exc:
+        log.warning("voice unavailable for %s: %s", job_id, exc)
+        _update(job, status="script_ready", step="Voice unavailable", progress=0, error=str(exc))
     except Exception as exc:
         log.exception("render failed for %s", job_id)
         _update(job, status="failed", step="Render failed", error=str(exc))

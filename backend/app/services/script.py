@@ -1,3 +1,4 @@
+import json
 import re
 
 from pydantic import ValidationError
@@ -208,3 +209,39 @@ async def to_devanagari(text: str, model: str | None = None) -> str:
     if not out or not re.search(r"[ऀ-ॿ]", out):
         return text
     return out
+
+
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+async def to_devanagari_batch(texts: list[str], model: str | None = None) -> list[str]:
+    """Converts every text in one request; any item the model gets wrong keeps its original text."""
+    if not texts:
+        return []
+    messages = [
+        {
+            "role": "system",
+            "content": "You transliterate Roman-script Hinglish into natural Devanagari Hindi for text-to-speech. Reply with a single JSON object only.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "Convert each Hinglish (Hindi in Roman script) item into natural Devanagari Hindi. "
+                "Write English loanwords the way they are commonly written in Devanagari. "
+                "Keep the meaning and punctuation of every item.\n"
+                f'Return {{"items": [...]}} with exactly {len(texts)} strings, in the same order.\n\n'
+                f"{json.dumps(texts, ensure_ascii=False)}"
+            ),
+        },
+    ]
+    try:
+        data = await chat_json(messages, model=model, temperature=0.2, max_tokens=4096)
+    except Exception:
+        return list(texts)
+    items = data.get("items")
+    if not isinstance(items, list) or len(items) != len(texts):
+        return list(texts)
+    return [
+        item.strip() if isinstance(item, str) and _DEVANAGARI.search(item) else original
+        for item, original in zip(items, texts)
+    ]

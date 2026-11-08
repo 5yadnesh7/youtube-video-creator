@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import re
 import uuid
@@ -170,6 +171,7 @@ async def _openrouter_tts(text: str, model: dict, voice: Optional[str], dst: Pat
     body = {"model": model["id"], "input": text, "response_format": model["format"]}
     if voice and voice != "default":
         body["voice"] = voice
+    await openrouter.throttle()
     async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT) as client:
         resp = await client.post(
             f"{app_settings.openrouter_base_url}/audio/speech",
@@ -180,7 +182,10 @@ async def _openrouter_tts(text: str, model: dict, voice: Optional[str], dst: Pat
         limit = openrouter.note_daily_limit(resp)
         if limit:
             raise limit
-        if resp.status_code in (400, 404):
+        minute_wait = openrouter.minute_limit_wait(resp)
+        if minute_wait is not None:
+            raise openrouter.RateLimitError(minute_wait)
+        if resp.status_code == 404:
             _openrouter_disabled[model["id"]] = True
         raise RuntimeError(f"OpenRouter {resp.status_code}: {resp.text[:150]}")
     if len(resp.content) < 1000:
@@ -210,43 +215,64 @@ async def _edge_tts(text: str, voice: str, dst: Path) -> None:
     await _validate(dst)
 
 
-async def _to_devanagari_safe(text: str, model: Optional[str]) -> str:
+class VoiceUnavailableError(RuntimeError):
+    """The voice the user picked cannot be generated; it is never swapped silently for another voice."""
+
+
+VOICE_ATTEMPTS = 5
+
+
+async def _devanagari_batch(texts: list[str], model: Optional[str]) -> list[str]:
     try:
-        from app.services.script import to_devanagari
+        from app.services.script import to_devanagari_batch
 
-        out = await to_devanagari(text, model)
-        return out.strip() or text
+        return await to_devanagari_batch(texts, model)
     except Exception as e:
-        log.info("to_devanagari unavailable, using original text: %s", e)
-        return text
+        log.warning("Devanagari conversion unavailable, using original text: %s", e)
+        return list(texts)
 
 
-def _openrouter_candidates(
-    language: str, gender: str, chosen: Optional[tuple[str, str]]
-) -> list[tuple[dict, Optional[str]]]:
-    if not chosen or chosen[0] == "edge":
-        return []
-    return [(OPENROUTER_MODELS[chosen[0]], chosen[1])]
+async def _speak_openrouter(text: str, chosen: tuple[str, str], dst: Path) -> None:
+    provider, voice = chosen
+    model = OPENROUTER_MODELS[provider]
+    name = f"{model['label']} voice '{voice}'"
+    if not app_settings.openrouter_api_key:
+        raise VoiceUnavailableError(f"{name} needs OPENROUTER_API_KEY. Pick a Microsoft Edge voice instead.")
+    if _openrouter_disabled.get(model["id"]):
+        raise VoiceUnavailableError(f"{name} is no longer available on OpenRouter. Pick another voice.")
+    blocked = openrouter.daily_limit_error()
+    if blocked:
+        raise VoiceUnavailableError(f"{name} cannot be used right now: {blocked}")
+    last: Optional[Exception] = None
+    for attempt in range(VOICE_ATTEMPTS):
+        try:
+            await _openrouter_tts(text, model, voice, dst)
+            return
+        except openrouter.DailyLimitError as e:
+            raise VoiceUnavailableError(f"{name} stopped: {e}") from e
+        except openrouter.RateLimitError as e:
+            last = e
+            log.warning("%s rate limited, waiting %.0fs", name, e.wait)
+            await asyncio.sleep(e.wait)
+        except Exception as e:
+            last = e
+            log.warning("%s attempt %d failed: %s", name, attempt + 1, e)
+            await asyncio.sleep(1.5 * (attempt + 1))
+    raise VoiceUnavailableError(
+        f"{name} could not be generated ({last}). "
+        "Pick another voice, for example a Microsoft Edge voice, and generate again."
+    )
 
 
 async def _speak(
     text: str, language: str, gender: str, voice_id: Optional[str], dst: Path
 ) -> None:
     chosen = parse_voice_id(voice_id)
-    if app_settings.openrouter_api_key and not openrouter.daily_limit_error():
-        for m, voice in _openrouter_candidates(language, gender, chosen):
-            if _openrouter_disabled.get(m["id"]):
-                continue
-            try:
-                await _openrouter_tts(text, m, voice, dst)
-                return
-            except openrouter.DailyLimitError as e:
-                log.warning("%s; using edge-tts instead", e)
-                break
-            except Exception as e:
-                log.warning("OpenRouter TTS %s failed (%s); trying next", m["id"], e)
+    if chosen and chosen[0] != "edge":
+        await _speak_openrouter(text, chosen, dst)
+        return
 
-    edge_voice = chosen[1] if chosen and chosen[0] == "edge" else EDGE_VOICES[(language, gender)]
+    edge_voice = chosen[1] if chosen else EDGE_VOICES[(language, gender)]
     last: Optional[Exception] = None
     for attempt in range(EDGE_ATTEMPTS):
         try:
@@ -257,16 +283,6 @@ async def _speak(
             log.warning("edge-tts attempt %d failed: %s", attempt + 1, e)
             await asyncio.sleep(1.0 * (attempt + 1))
     raise RuntimeError(f"TTS failed: {last}")
-
-
-async def _synthesize_one(
-    scene: Scene, cfg: JobSettings, dst: Path, model: Optional[str]
-) -> SceneAudio:
-    text = scene.narration
-    if cfg.language == "hinglish":
-        text = await _to_devanagari_safe(text, model)
-    await _speak(text, cfg.language, cfg.voice, cfg.voice_id, dst)
-    return SceneAudio(path=str(dst.resolve()), duration=await probe_duration(dst))
 
 
 async def _cap_duration(path: Path, seconds: float) -> None:
@@ -305,6 +321,11 @@ async def synthesize_preview(voice_id: str, language: str, dst: Path) -> Path:
     return dst
 
 
+def _scene_path(out_dir: Path, i: int, cfg: JobSettings, spoken: str) -> Path:
+    key = hashlib.sha1(f"{cfg.language}|{cfg.voice_id or cfg.voice}|{spoken}".encode()).hexdigest()[:10]
+    return out_dir / f"scene_{i:03d}_{key}.mp3"
+
+
 async def synthesize_scenes(
     scenes: list[Scene],
     settings: JobSettings,
@@ -315,18 +336,37 @@ async def synthesize_scenes(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     total = len(scenes)
+    spoken = [s.narration for s in scenes]
+    if settings.language == "hinglish":
+        spoken = await _devanagari_batch(spoken, model or settings.model)
+    # Keyed by text + voice so a retry after a failure reuses finished scenes.
+    paths = [_scene_path(out_dir, i, settings, t) for i, t in enumerate(spoken)]
     sem = asyncio.Semaphore(CONCURRENCY)
     done = 0
 
-    async def work(i: int, scene: Scene) -> SceneAudio:
+    async def work(i: int) -> SceneAudio:
         nonlocal done
+        dst = paths[i]
         async with sem:
-            res = await _synthesize_one(
-                scene, settings, out_dir / f"scene_{i:03d}.mp3", model or settings.model
-            )
+            duration = await probe_duration(dst) if dst.exists() else 0.0
+            if duration < MIN_DURATION:
+                await _speak(spoken[i], settings.language, settings.voice, settings.voice_id, dst)
+                duration = await probe_duration(dst)
         done += 1
         if on_progress:
             on_progress(done, total)
-        return res
+        return SceneAudio(path=str(dst.resolve()), duration=duration)
 
-    return list(await asyncio.gather(*(work(i, s) for i, s in enumerate(scenes))))
+    tasks = [asyncio.ensure_future(work(i)) for i in range(total)]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    keep = {p.name for p in paths}
+    for f in out_dir.glob("scene_*.mp3"):
+        if f.name not in keep:
+            f.unlink(missing_ok=True)
+    return list(results)

@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,23 @@ def _make_mp3(path: Path, secs: float = 1.0):
         ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"sine=d={secs}", str(path)],
         check=True,
     )
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    async def passthrough(texts, model):
+        return list(texts)
+
+    real_sleep = asyncio.sleep
+    sleeps = []
+
+    async def fast_sleep(delay, *a, **k):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(tts, "_devanagari_batch", passthrough)
+    monkeypatch.setattr(tts.asyncio, "sleep", fast_sleep)
+    return sleeps
 
 
 @pytest.fixture
@@ -61,20 +79,22 @@ def test_hinglish_uses_edge_hindi(tmp_path, monkeypatch, fake_edge):
     assert not called and fake_edge[0][1] == "hi-IN-MadhurNeural"
 
 
-def test_openrouter_failure_falls_back(tmp_path, monkeypatch, fake_edge):
+def test_chosen_voice_failure_raises_instead_of_switching_voice(tmp_path, monkeypatch, fake_edge):
     monkeypatch.setattr(tts.app_settings, "openrouter_api_key", "k")
     tts._openrouter_disabled.clear()
 
     async def fail(text, model, voice, dst):
-        raise RuntimeError("OpenRouter 429")
+        raise RuntimeError("OpenRouter 500")
 
     monkeypatch.setattr(tts, "_openrouter_tts", fail)
-    res = asyncio.run(
-        tts.synthesize_scenes(
-            [Scene(narration="a", visual_query="x")], JobSettings(voice_id="heygen:bram"), tmp_path
+    with pytest.raises(tts.VoiceUnavailableError) as exc:
+        asyncio.run(
+            tts.synthesize_scenes(
+                [Scene(narration="a", visual_query="x")], JobSettings(voice_id="heygen:bram"), tmp_path
+            )
         )
-    )
-    assert res[0].duration > 0.9 and len(fake_edge) == 1
+    assert "Pick another voice" in str(exc.value)
+    assert fake_edge == []
 
 
 def test_openrouter_success(tmp_path, monkeypatch, fake_edge):
@@ -228,30 +248,82 @@ def _daily_limit_response():
     return httpx.Response(
         429,
         json={"error": {"message": "Rate limit exceeded: free-models-per-day", "metadata": {
-            "headers": {"X-RateLimit-Reset": "1794096000000"}}}},
+            "headers": {"X-RateLimit-Reset": str(int((time.time() + 3600) * 1000))}}}},
     )
 
 
-def test_daily_limit_skips_openrouter_and_falls_back_to_edge(tmp_path, monkeypatch, fake_edge):
+def test_daily_limit_stops_chosen_voice_without_mixing_voices(tmp_path, monkeypatch, fake_edge):
     from app.services import openrouter
 
     monkeypatch.setattr(tts.app_settings, "openrouter_api_key", "k")
     monkeypatch.setattr(openrouter, "_daily_block", None)
-    calls = []
+    tts._openrouter_disabled.clear()
 
     async def limited(text, model, voice, dst):
-        calls.append(model["id"])
         raise openrouter.note_daily_limit(_daily_limit_response())
 
     monkeypatch.setattr(tts, "_openrouter_tts", limited)
     scenes = [Scene(narration=n, visual_query="x") for n in ("a", "b", "c")]
-    res = asyncio.run(
-        tts.synthesize_scenes(scenes, JobSettings(voice_id="heygen:bram"), tmp_path)
-    )
-    assert len(res) == 3 and len(fake_edge) == 3
-    assert len(calls) <= 3  # concurrent first wave only; later scenes skip OpenRouter entirely
-    assert openrouter.daily_limit_error() is not None
+    with pytest.raises(tts.VoiceUnavailableError) as exc:
+        asyncio.run(tts.synthesize_scenes(scenes, JobSettings(voice_id="heygen:bram"), tmp_path))
+    assert "daily limit" in str(exc.value)
+    assert fake_edge == []
     monkeypatch.setattr(openrouter, "_daily_block", None)
+
+
+def test_minute_limit_waits_and_retries_the_same_voice(tmp_path, monkeypatch, fake_edge, offline):
+    from app.services import openrouter
+
+    monkeypatch.setattr(tts.app_settings, "openrouter_api_key", "k")
+    tts._openrouter_disabled.clear()
+    attempts = []
+
+    async def flaky(text, model, voice, dst):
+        attempts.append(voice)
+        if len(attempts) <= 2:
+            raise openrouter.RateLimitError(7.5)
+        _make_mp3(dst, 1.0)
+
+    monkeypatch.setattr(tts, "_openrouter_tts", flaky)
+    res = asyncio.run(
+        tts.synthesize_scenes(
+            [Scene(narration="a", visual_query="x")], JobSettings(voice_id="heygen:nadine"), tmp_path
+        )
+    )
+    assert len(res) == 1 and attempts == ["nadine"] * 3
+    assert offline.count(7.5) == 2 and fake_edge == []
+
+
+def test_finished_scenes_are_reused_on_retry(tmp_path, fake_edge):
+    scenes = [Scene(narration=n, visual_query="x") for n in ("one", "two", "three")]
+    cfg = JobSettings()
+    first = asyncio.run(tts.synthesize_scenes(scenes, cfg, tmp_path))
+    assert len(fake_edge) == 3
+    second = asyncio.run(tts.synthesize_scenes(scenes, cfg, tmp_path))
+    assert len(fake_edge) == 3
+    assert [r.path for r in first] == [r.path for r in second]
+
+
+def test_changing_voice_regenerates_and_removes_stale_files(tmp_path, fake_edge):
+    scenes = [Scene(narration="one", visual_query="x")]
+    asyncio.run(tts.synthesize_scenes(scenes, JobSettings(voice_id="edge:en-US-GuyNeural"), tmp_path))
+    asyncio.run(tts.synthesize_scenes(scenes, JobSettings(voice_id="edge:en-GB-RyanNeural"), tmp_path))
+    assert [v for _, v in fake_edge] == ["en-US-GuyNeural", "en-GB-RyanNeural"]
+    assert len(list(tmp_path.glob("scene_*.mp3"))) == 1
+
+
+def test_hinglish_converts_all_scenes_in_one_request(tmp_path, monkeypatch, fake_edge):
+    batches = []
+
+    async def batch(texts, model):
+        batches.append(list(texts))
+        return [f"HI-{t}" for t in texts]
+
+    monkeypatch.setattr(tts, "_devanagari_batch", batch)
+    scenes = [Scene(narration=n, visual_query="x") for n in ("a", "b", "c", "d")]
+    asyncio.run(tts.synthesize_scenes(scenes, JobSettings(language="hinglish"), tmp_path))
+    assert batches == [["a", "b", "c", "d"]]
+    assert sorted(t for t, _ in fake_edge) == ["HI-a", "HI-b", "HI-c", "HI-d"]
 
 
 def test_note_daily_limit_ignores_other_429s(monkeypatch):

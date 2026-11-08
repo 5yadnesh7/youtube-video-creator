@@ -305,6 +305,19 @@ export function JobView({
       <div>
         {header}
         {actionErr}
+        {job.error && (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <p className="font-semibold">The last video was not finished</p>
+            <p className="mt-1 [overflow-wrap:anywhere]">{job.error}</p>
+            <p className="mt-2">
+              Your script is saved. Choose a voice in the Voice section below and generate again. Scenes that
+              were already voiced are reused when you keep the same voice.
+            </p>
+          </div>
+        )}
         <ScriptEditor
           key={`${job.id}-${job.script.title}-${job.script.scenes.length}-${job.script.hook}`}
           initial={job.script}

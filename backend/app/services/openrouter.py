@@ -1,7 +1,9 @@
 import asyncio
 import json
 import re
+import threading
 import time
+from collections import deque
 from typing import Any
 
 import httpx
@@ -37,6 +39,49 @@ _daily_block: tuple[float, str] | None = None
 
 class DailyLimitError(RuntimeError):
     pass
+
+
+class RateLimitError(RuntimeError):
+    def __init__(self, wait: float):
+        super().__init__(f"OpenRouter per-minute rate limit reached; retry in {wait:.0f}s")
+        self.wait = wait
+
+
+# The free tier allows 20 requests/minute across all models, text and voice alike;
+# stay under it so retries and per-scene calls never starve each other.
+RATE_LIMIT_PER_MIN = 16
+MINUTE_LIMIT_MARKER = "free-models-per-min"
+_window: deque[float] = deque()
+_window_lock = threading.Lock()
+
+
+def _reserve_slot() -> float:
+    with _window_lock:
+        now = time.monotonic()
+        while _window and now - _window[0] >= 60:
+            _window.popleft()
+        if len(_window) < RATE_LIMIT_PER_MIN:
+            _window.append(now)
+            return 0.0
+        return 60 - (now - _window[0]) + 0.05
+
+
+async def throttle() -> None:
+    while (wait := _reserve_slot()) > 0:
+        await asyncio.sleep(wait)
+
+
+def minute_limit_wait(resp: httpx.Response) -> float | None:
+    """Seconds to wait when resp is the per-minute free-tier 429, else None."""
+    if resp.status_code != 429 or MINUTE_LIMIT_MARKER not in resp.text:
+        return None
+    wait = 20.0
+    try:
+        reset = int(resp.json()["error"]["metadata"]["headers"]["X-RateLimit-Reset"]) / 1000
+        wait = reset - time.time()
+    except (ValueError, KeyError, TypeError):
+        pass
+    return min(max(wait, 1.0) + 0.5, 65.0)
 
 
 def note_daily_limit(resp: httpx.Response) -> DailyLimitError | None:
@@ -146,7 +191,9 @@ def _extract_content(payload: dict) -> str:
 async def _call_model(client: httpx.AsyncClient, model: str, body: dict) -> str:
     last: Exception | None = None
     for attempt in range(MAX_RETRIES):
+        delay = BACKOFF_BASE**attempt
         try:
+            await throttle()
             resp = await client.post(
                 f"{settings.openrouter_base_url}/chat/completions",
                 headers=_headers(),
@@ -155,7 +202,11 @@ async def _call_model(client: httpx.AsyncClient, model: str, body: dict) -> str:
             limit = note_daily_limit(resp)
             if limit:
                 raise limit
-            if resp.status_code in RETRYABLE:
+            minute_wait = minute_limit_wait(resp)
+            if minute_wait is not None:
+                last = RateLimitError(minute_wait)
+                delay = minute_wait
+            elif resp.status_code in RETRYABLE:
                 last = RuntimeError(f"HTTP {resp.status_code}")
             elif resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code} {resp.text[:200]}")
@@ -168,7 +219,7 @@ async def _call_model(client: httpx.AsyncClient, model: str, body: dict) -> str:
         except (httpx.TimeoutException, httpx.TransportError, ValueError) as e:
             last = e
         if attempt < MAX_RETRIES - 1:
-            await asyncio.sleep(BACKOFF_BASE**attempt)
+            await asyncio.sleep(delay)
     raise last or RuntimeError("failed")
 
 

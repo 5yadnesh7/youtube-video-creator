@@ -233,3 +233,84 @@ def test_prompt_warns_when_research_missing_or_ungrounded():
         text = _prompt_text(r)
         assert "No verified research" in text
         assert "RESEARCH (" not in text
+
+
+def test_throttle_spaces_requests_within_the_per_minute_budget(monkeypatch):
+    from app.services import openrouter
+
+    openrouter._window.clear()
+    monkeypatch.setattr(openrouter, "RATE_LIMIT_PER_MIN", 3)
+    assert [openrouter._reserve_slot() for _ in range(3)] == [0.0, 0.0, 0.0]
+    wait = openrouter._reserve_slot()
+    assert 55 < wait <= 60.1
+    openrouter._window.clear()
+
+
+def test_minute_limit_wait_parses_reset_and_ignores_other_429s():
+    import time as _t
+
+    from app.services import openrouter
+
+    reset_ms = int((_t.time() + 12) * 1000)
+    body = {"error": {"message": "Rate limit exceeded: free-models-per-min. ", "metadata": {
+        "headers": {"X-RateLimit-Reset": str(reset_ms)}}}}
+    wait = openrouter.minute_limit_wait(httpx.Response(429, json=body))
+    assert 11 < wait < 14
+    assert openrouter.minute_limit_wait(httpx.Response(429, text="provider busy")) is None
+    assert openrouter.minute_limit_wait(httpx.Response(200, text="free-models-per-min")) is None
+    no_header = httpx.Response(429, text="Rate limit exceeded: free-models-per-min")
+    assert openrouter.minute_limit_wait(no_header) == 20.5
+
+
+def test_devanagari_batch_single_request_and_per_item_fallback(monkeypatch):
+    from app.services import script as script_svc
+
+    calls = []
+
+    async def fake_json(messages, model=None, temperature=0.7, max_tokens=None):
+        calls.append(messages)
+        return {"items": ["नमस्ते दोस्तों", "still roman", "आज की खबर"]}
+
+    monkeypatch.setattr(script_svc, "chat_json", fake_json)
+    out = asyncio.run(script_svc.to_devanagari_batch(["namaste dosto", "kuch bhi", "aaj ki khabar"]))
+    assert len(calls) == 1
+    assert out == ["नमस्ते दोस्तों", "kuch bhi", "आज की खबर"]
+
+
+def test_devanagari_batch_falls_back_on_wrong_length_or_error(monkeypatch):
+    from app.services import script as script_svc
+
+    async def short(messages, **k):
+        return {"items": ["एक"]}
+
+    async def boom(messages, **k):
+        raise RuntimeError("down")
+
+    texts = ["a", "b"]
+    monkeypatch.setattr(script_svc, "chat_json", short)
+    assert asyncio.run(script_svc.to_devanagari_batch(texts)) == texts
+    monkeypatch.setattr(script_svc, "chat_json", boom)
+    assert asyncio.run(script_svc.to_devanagari_batch(texts)) == texts
+    assert asyncio.run(script_svc.to_devanagari_batch([])) == []
+
+
+def test_media_manifest_reused_only_when_scenes_unchanged(tmp_path):
+    import json as _json
+
+    from app.jobs import runner
+    from app.schemas import Scene
+
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    scenes = [Scene(narration="a", visual_query="moon", media_type="video")]
+    manifest = tmp_path / "media.json"
+    items = [{"path": str(f), "kind": "video", "source": "pexels"}]
+    manifest.write_text(_json.dumps({"key": runner._media_key(scenes), "items": items}))
+    assert runner._load_media_manifest(manifest, scenes)[0].path == str(f)
+    changed = [Scene(narration="a", visual_query="sun", media_type="video")]
+    assert runner._load_media_manifest(manifest, changed) is None
+    manifest.write_text(_json.dumps([{"path": str(f), "kind": "video"}]))
+    assert runner._load_media_manifest(manifest, scenes) is None
+    f.unlink()
+    manifest.write_text(_json.dumps({"key": runner._media_key(scenes), "items": items}))
+    assert runner._load_media_manifest(manifest, scenes) is None
