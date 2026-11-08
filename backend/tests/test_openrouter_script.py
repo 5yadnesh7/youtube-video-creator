@@ -337,3 +337,61 @@ def test_script_targets_for_two_to_five_minutes(fmt, seconds, words):
     w, scenes = script_mod._targets(s)
     assert w == words
     assert scenes == round(seconds / (8 if fmt == "vertical" else 11))
+
+
+def test_prompt_asks_for_content_based_media_choice_not_mostly_video():
+    text = _prompt_text(None, duration=60)
+    assert "decide per scene" in text
+    assert "named person" in text and "chart" in text and "motion or atmosphere" in text
+    assert "use \"video\" for most scenes" not in text
+
+
+def test_retry_shows_the_model_its_script_and_asks_to_summarise_when_too_long(fake_net):
+    long_payload = make_script_payload(8, 40)  # 320 words vs a 150 word target
+    ok_payload = make_script_payload(8, 19)
+    replies = iter([json.dumps(long_payload), json.dumps(ok_payload)])
+    fake_net["chat_handler"] = lambda body: httpx.Response(200, json=completion(next(replies)))
+    s = run(script_mod.generate_script("topic", JobSettings(duration_seconds=60)))
+    assert len(fake_net["calls"]) == 2 and len(s.scenes) == 8
+    second = fake_net["calls"][1]["messages"]
+    assert second[-2]["role"] == "assistant" and json.loads(second[-2]["content"]) == long_payload
+    feedback = second[-1]["content"]
+    assert "Summarise" in feedback and "Do NOT delete scenes" in feedback and "too long" in feedback
+
+
+def test_retry_asks_to_expand_when_too_short(fake_net):
+    short_payload = make_script_payload(8, 8)  # 64 words
+    ok_payload = make_script_payload(8, 19)
+    replies = iter([json.dumps(short_payload), json.dumps(ok_payload)])
+    fake_net["chat_handler"] = lambda body: httpx.Response(200, json=completion(next(replies)))
+    run(script_mod.generate_script("topic", JobSettings(duration_seconds=60)))
+    feedback = fake_net["calls"][1]["messages"][-1]["content"]
+    assert "too short" in feedback and "Expand" in feedback and "only facts you were given" in feedback
+
+
+def test_clamp_drops_whole_sentences_never_cuts_one_in_half():
+    from app.schemas import Scene, Script
+
+    sentences = ["First idea is explained here clearly.", "Second idea follows with detail.",
+                 "Third idea adds more depth to it.", "Fourth idea wraps this section up."]
+    middle = " ".join(sentences)  # 24 words
+    scenes = [Scene(narration="Opening hook line for the video.", visual_query="a")]
+    scenes += [Scene(narration=middle, visual_query="b") for _ in range(6)]
+    scenes += [Scene(narration="Like and subscribe for more.", visual_query="c")]
+    script = Script(title="T", hook="H", scenes=scenes)
+    out = script_mod._clamp(script, words=100, scenes=8)
+    assert sum(len(s.narration.split()) for s in out.scenes) <= round(100 * (1 + script_mod.TOLERANCE))
+    assert out.scenes[0].narration == scenes[0].narration and out.scenes[-1].narration == scenes[-1].narration
+    for sc in out.scenes[1:-1]:
+        parts = script_mod._sentences(sc.narration)
+        assert parts and all(p in sentences for p in parts)
+        assert sc.narration.endswith(".")
+
+
+def test_clamp_without_sentence_breaks_falls_back_to_dropping_scenes():
+    from app.schemas import Scene, Script
+
+    scenes = [Scene(narration=" ".join(["word"] * 20), visual_query="a") for _ in range(12)]
+    out = script_mod._clamp(Script(title="T", hook="H", scenes=scenes), words=100, scenes=8)
+    assert sum(len(s.narration.split()) for s in out.scenes) <= 112
+    assert all(len(s.narration.split()) == 20 for s in out.scenes)  # scenes dropped, none chopped

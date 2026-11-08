@@ -10,7 +10,7 @@ from app.services.openrouter import chat_json, chat_text
 WPM = {"english": 150, "hinglish": 130}
 TOLERANCE = 0.12
 SCENE_TOLERANCE = 0.35
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
 
 
 def _words(text: str) -> int:
@@ -77,8 +77,11 @@ Requirements:
 - About {scenes} scenes (each scene covers roughly {span} seconds of speech).
 - Structure: the first scene is a strong hook that grabs attention in the first 3 seconds (a bold claim, surprising fact or question); then body scenes that deliver value in a clear order; the final scene is a short call to action (like, subscribe, comment).
 - No stage directions, no emojis, no scene labels inside narration. Plain spoken text only.
-- visual_query: ENGLISH only, concrete and searchable stock-footage keywords, 2-4 words (e.g. "city traffic night", "person typing laptop"). Never abstract concepts.
-- media_type: "video" or "image"; use "video" for most scenes, "image" for a few where a still works (diagrams, landmarks, objects).
+- media_type: decide per scene from what the narration is about, not from a default.
+  * "image" when the scene is about one specific, still thing: a named person, place or landmark, a product or object, a document, chart or statistic, a map, a historical moment, a diagram, or a close-up detail. A clean photo fits these better than footage.
+  * "video" when the scene is about motion or atmosphere: action, a process, crowds, traffic, weather, nature, technology in use, travel, sports, transitions between ideas.
+  Let the content decide; a typical explainer or news script ends up with roughly a third to a half images. Do not make every scene video, and do not make every scene an image.
+- visual_query: ENGLISH only, 2-4 searchable words. For "image" scenes name the specific subject (e.g. "eiffel tower paris", "stock market chart"). For "video" scenes describe the action or setting (e.g. "city traffic night", "person typing laptop"). Never abstract concepts.
 - mood: one word (e.g. energetic, calm, dramatic, inspiring, mysterious).
 
 Return JSON exactly in this shape:
@@ -119,30 +122,52 @@ def _within(value: int, target: int, tol: float = TOLERANCE) -> bool:
     return target * (1 - tol) <= value <= target * (1 + tol)
 
 
+def _sentences(text: str) -> list[str]:
+    return [part for part in re.split(r"(?<=[.!?\u0964])\s+", text.strip()) if part]
+
+
 def _clamp(script: Script, words: int, scenes: int) -> Script:
+    """Last resort when the model never fit the length: drop whole sentences, never cut one in half."""
     out = list(script.scenes)
     max_scenes = round(scenes * (1 + SCENE_TOLERANCE))
     if len(out) > max_scenes:
         out = out[: max_scenes - 1] + [out[-1]]
     max_words = round(words * (1 + TOLERANCE))
-    excess = sum(_words(s.narration) for s in out) - max_words
-    if excess > 0:
-        i = len(out) - 2
-        while i > 0 and excess > 0 and len(out) > 3:
-            n = _words(out[i].narration)
-            if n <= excess + 4:
-                excess -= n
-                out.pop(i)
-            i -= 1
-    if excess > 0 and len(out) > 1:
-        idx = len(out) - 2 if len(out) > 2 else 0
-        ws = out[idx].narration.split()
-        keep = max(6, len(ws) - excess)
-        trimmed = " ".join(ws[:keep]).rstrip(",;:")
-        if not trimmed.endswith((".", "!", "?")):
-            trimmed += "."
-        out[idx] = out[idx].model_copy(update={"narration": trimmed})
+
+    def total() -> int:
+        return sum(_words(sc.narration) for sc in out)
+
+    while total() > max_words:
+        multi = [i for i in range(1, len(out) - 1) if len(_sentences(out[i].narration)) > 1]
+        if not multi:
+            break
+        i = max(multi, key=lambda k: _words(out[k].narration))
+        kept = _sentences(out[i].narration)[:-1]
+        out[i] = out[i].model_copy(update={"narration": " ".join(kept)})
+    while total() > max_words and len(out) > 3:
+        out.pop(len(out) - 2)
     return Script(title=script.title, hook=script.hook, scenes=out)
+
+
+def _feedback(w: int, n: int, words: int, scenes: int) -> str:
+    gap = abs(words - w)
+    if w > words * (1 + TOLERANCE):
+        how = (
+            f"It is about {gap} words too long. Do NOT delete scenes or cut sentences off. Summarise instead: "
+            "keep every key point, merge related ideas, shorten examples and tighten the wording. "
+            "Keep the hook and the closing call to action."
+        )
+    elif w < words * (1 - TOLERANCE):
+        how = (
+            f"It is about {gap} words too short. Expand it with more context, explanation, why it matters "
+            "and what to watch next, using only facts you were given."
+        )
+    else:
+        how = "The word count is fine, but the number of scenes is off."
+    return (
+        f"Your script has {w} words in {n} scenes. I need about {words} words in about {scenes} scenes. "
+        f"{how} Return the full script as JSON only."
+    )
 
 
 async def generate_script(
@@ -172,13 +197,8 @@ async def generate_script(
         if score < best_score:
             best, best_score = script, score
         messages = messages + [
-            {
-                "role": "user",
-                "content": (
-                    f"Your script had {w} words and {n} scenes. I need about {words} words and about {scenes} scenes. "
-                    "Rewrite the full script and return JSON only."
-                ),
-            }
+            {"role": "assistant", "content": json.dumps(data, ensure_ascii=False)},
+            {"role": "user", "content": _feedback(w, n, words, scenes)},
         ]
     if best is None:
         raise RuntimeError(f"Script generation failed: {last_err}")
