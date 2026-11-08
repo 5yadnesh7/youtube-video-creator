@@ -30,6 +30,10 @@ class LLMProvider(ABC):
         return False
 
     setup_hint: str = ""
+    no_models_hint: str = "no models available"
+
+    async def warm(self) -> None:
+        """Optional: do slow one-off preparation (e.g. checking which models work) ahead of time."""
 
     def is_available(self) -> bool:
         """False while the provider is configured but temporarily unusable (e.g. quota used up)."""

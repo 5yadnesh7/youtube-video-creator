@@ -64,6 +64,14 @@ def mock_ollama(monkeypatch, handler):
     return seen
 
 
+def is_probe(request) -> bool:
+    return request.url.path == "/api/chat" and json.loads(request.content).get("options", {}).get("num_predict") == 1
+
+
+def real_chats(seen):
+    return [r for r in seen if r.url.path == "/api/chat" and not is_probe(r)]
+
+
 def mock_openrouter(monkeypatch, handler):
     monkeypatch.setattr(
         openrouter, "_make_client",
@@ -85,7 +93,7 @@ def test_ollama_request_matches_the_cloud_api(monkeypatch):
     seen = mock_ollama(monkeypatch, handler)
     out = run(OllamaProvider().chat_text(MESSAGES, None, 0.3, 500))
     assert out == "hello"
-    chat = [r for r in seen if r.url.path == "/api/chat"][0]
+    chat = real_chats(seen)[0]
     assert str(chat.url) == "https://ollama.com/api/chat"
     assert chat.headers["authorization"] == "Bearer oll-key"
     body = json.loads(chat.content)
@@ -99,7 +107,7 @@ def test_ollama_picks_a_text_model_from_the_live_list_and_caches_it(monkeypatch)
     run(provider.chat_text(MESSAGES, None, 0.5, None))
     run(provider.chat_text(MESSAGES, None, 0.5, None))
     assert sum(1 for r in seen if r.url.path == "/api/tags") == 1
-    models = {json.loads(r.content)["model"] for r in seen if r.url.path == "/api/chat"}
+    models = {json.loads(r.content)["model"] for r in real_chats(seen)}
     assert models == {"gpt-oss:120b"}
 
 
@@ -108,7 +116,7 @@ def test_ollama_skips_models_that_cannot_complete_text(monkeypatch):
                        {"name": "some-new-model", "capabilities": ["completion"]}]}
     seen = mock_ollama(monkeypatch, lambda r: httpx.Response(200, json=tags if r.url.path == "/api/tags" else reply("ok")))
     run(OllamaProvider().chat_text(MESSAGES, None, 0.5, None))
-    assert json.loads([r for r in seen if r.url.path == "/api/chat"][0].content)["model"] == "some-new-model"
+    assert json.loads(real_chats(seen)[0].content)["model"] == "some-new-model"
 
 
 def test_ollama_model_setting_and_explicit_model_win(monkeypatch):
@@ -130,7 +138,7 @@ def test_ollama_rejected_key_is_a_clear_error_without_retries(monkeypatch):
     seen = mock_ollama(monkeypatch, lambda r: httpx.Response(401, json={"error": "Unauthorized"}) if r.url.path == "/api/chat" else httpx.Response(200, json=TAGS))
     with pytest.raises(LLMError, match="OLLAMA_API_KEY"):
         run(OllamaProvider().chat_text(MESSAGES, None, 0.5, None))
-    assert sum(1 for r in seen if r.url.path == "/api/chat") == 1
+    assert len(real_chats(seen)) == 1
 
 
 def test_ollama_retries_transient_errors_then_succeeds(monkeypatch):
@@ -139,6 +147,8 @@ def test_ollama_retries_transient_errors_then_succeeds(monkeypatch):
     def handler(req):
         if req.url.path == "/api/tags":
             return httpx.Response(200, json=TAGS)
+        if is_probe(req):
+            return httpx.Response(200, json=reply(""))
         attempts["n"] += 1
         return httpx.Response(429 if attempts["n"] < 3 else 200, json=reply("finally"))
 
@@ -330,7 +340,7 @@ def test_script_is_written_by_ollama_when_openrouter_hits_its_daily_limit(monkey
 
     s = run(script_mod.generate_script("topic", JobSettings(duration_seconds=60), "meta-llama/llama-3.3-70b-instruct:free"))
     assert len(s.scenes) == 8 and s.title == "T"
-    used = json.loads([r for r in seen if r.url.path == "/api/chat"][0].content)["model"]
+    used = json.loads(real_chats(seen)[0].content)["model"]
     assert used == "gpt-oss:120b"  # the OpenRouter model id was not forwarded to Ollama
     assert openrouter.daily_limit_error() is not None  # later calls skip OpenRouter instantly
 
@@ -563,3 +573,148 @@ def test_models_endpoint_returns_grouped_catalog(monkeypatch):
     assert data["default"] == "one:a"
     assert data["models"][0] == {"id": "one:a", "name": "a", "context_length": 0, "provider": "one", "provider_label": "One"}
     assert data["providers"][0]["id"] == "one" and data["providers"][0]["configured"] is True
+
+
+
+# ---------- only models the key can use
+
+PLAN = {"gemma4:31b": 200, "gpt-oss:120b": 402, "kimi-k3": 402}
+
+
+def plan_handler(statuses, seen_probes=None):
+    def handler(req):
+        if req.url.path == "/api/tags":
+            return httpx.Response(200, json=TAGS)
+        body = json.loads(req.content)
+        if is_probe(req):
+            if seen_probes is not None:
+                seen_probes.append(body["model"])
+            code = statuses.get(body["model"], 200)
+            return httpx.Response(code, json=reply("x") if code == 200 else {"error": "not included in your free usage"})
+        return httpx.Response(200, json=reply("answer"))
+
+    return handler
+
+
+def test_ollama_lists_only_the_models_this_key_can_use(monkeypatch):
+    mock_ollama(monkeypatch, plan_handler(PLAN))
+    models = run(OllamaProvider().list_models())
+    assert [m.id for m in models] == ["ollama:gemma4:31b"]
+
+
+def test_ollama_probe_is_a_one_token_request(monkeypatch):
+    seen = mock_ollama(monkeypatch, plan_handler(PLAN))
+    run(OllamaProvider().list_models())
+    probes = [json.loads(r.content) for r in seen if is_probe(r)]
+    assert {p["model"] for p in probes} == {"gemma4:31b", "gpt-oss:120b", "kimi-k3"}
+    assert all(p["stream"] is False and p["options"] == {"num_predict": 1} for p in probes)
+
+
+def test_probe_results_are_cached_and_not_repeated(monkeypatch):
+    probes = []
+    mock_ollama(monkeypatch, plan_handler(PLAN, probes))
+    provider = OllamaProvider()
+    run(provider.list_models())
+    run(provider.list_models())
+    run(provider.default_model())
+    assert len(probes) == 3  # one per model, ever, within the cache window
+
+
+def test_a_transient_failure_is_rechecked_soon_but_a_plan_refusal_is_not(monkeypatch):
+    probes = []
+    statuses = {"gemma4:31b": 503, "gpt-oss:120b": 402, "kimi-k3": 200}
+    mock_ollama(monkeypatch, plan_handler(statuses, probes))
+    provider = OllamaProvider()
+    assert [m.name for m in run(provider.list_models())] == ["kimi-k3"]
+
+    statuses["gemma4:31b"] = 200
+    clock = {"now": time.time()}
+    monkeypatch.setattr(ollama_provider.time, "time", lambda: clock["now"])
+    clock["now"] += ollama_provider.TRANSIENT_TTL + 1
+    probes.clear()
+    assert [m.name for m in run(provider.list_models())] == ["gemma4:31b", "kimi-k3"]
+    assert probes == ["gemma4:31b"]  # only the transient one was looked at again
+
+    clock["now"] += ollama_provider.STABLE_TTL + 1
+    probes.clear()
+    run(provider.list_models())
+    assert sorted(probes) == ["gemma4:31b", "gpt-oss:120b", "kimi-k3"]  # eventually everything is re-checked
+
+
+def test_default_model_skips_a_preferred_model_the_key_cannot_use(monkeypatch):
+    mock_ollama(monkeypatch, plan_handler(PLAN))
+    assert run(OllamaProvider().default_model()) == "ollama:gemma4:31b"  # gpt-oss:120b is preferred but gated
+
+
+def test_a_paid_key_sees_everything_without_any_code_change(monkeypatch):
+    mock_ollama(monkeypatch, plan_handler({}))
+    assert [m.name for m in run(OllamaProvider().list_models())] == ["gpt-oss:120b", "gemma4:31b", "kimi-k3"]
+
+
+def test_an_explicit_ollama_model_setting_skips_probing(monkeypatch):
+    probes = []
+    mock_ollama(monkeypatch, plan_handler(PLAN, probes))
+    monkeypatch.setattr(settings, "ollama_model", "gemma4:31b")
+    run(OllamaProvider().chat_text(MESSAGES, None, 0.5, None))
+    assert probes == []
+
+
+def test_chatting_with_a_model_outside_the_plan_gives_a_clear_error_and_hides_it(monkeypatch):
+    def handler(req):
+        if req.url.path == "/api/tags":
+            return httpx.Response(200, json=TAGS)
+        if is_probe(req):
+            return httpx.Response(200, json=reply("x"))
+        return httpx.Response(402, json={"error": "this model is not included in your free usage"})
+
+    mock_ollama(monkeypatch, handler)
+    provider = OllamaProvider()
+    assert "ollama:kimi-k3" in [m.id for m in run(provider.list_models())]
+    with pytest.raises(LLMError, match="kimi-k3 is not included in this key's plan"):
+        run(provider.chat_text(MESSAGES, "kimi-k3", 0.5, None))
+    assert "ollama:kimi-k3" not in [m.id for m in run(provider.list_models())]
+
+
+def test_a_key_with_no_usable_models_is_explained_in_the_catalog(monkeypatch):
+    mock_ollama(monkeypatch, plan_handler({"gemma4:31b": 402, "gpt-oss:120b": 402, "kimi-k3": 402}))
+    monkeypatch.setattr(settings, "llm_providers", "ollama")
+    c = run(llm.catalog())
+    assert c.models == [] and "plan" in c.providers[0].note
+
+
+def test_probing_is_limited_to_a_few_requests_at_a_time(monkeypatch):
+    many = {"models": [{"name": f"m{i}", "capabilities": ["completion"]} for i in range(20)]}
+    state = {"now": 0, "peak": 0}
+
+    class Slow(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == "/api/tags":
+                return httpx.Response(200, json=many)
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            loop = asyncio.get_running_loop()
+            gate = loop.create_future()  # asyncio.sleep is stubbed out in these tests, so wait on a timer instead
+            loop.call_later(0.01, gate.set_result, None)
+            await gate
+            state["now"] -= 1
+            return httpx.Response(200, json=reply("x"))
+
+    monkeypatch.setattr(OllamaProvider, "_client", lambda self: httpx.AsyncClient(transport=Slow()))
+    run(OllamaProvider().warm())
+    assert 1 < state["peak"] <= ollama_provider.PROBE_CONCURRENCY
+
+
+def test_warm_up_prepares_every_configured_provider_and_survives_failures(monkeypatch):
+    warmed = []
+
+    class Warmable(FakeProvider):
+        async def warm(self):
+            warmed.append(self.name)
+            if self.name == "bad":
+                raise RuntimeError("boom")
+
+    factory.register_provider("bad", lambda: Warmable("bad"))
+    factory.register_provider("good", lambda: Warmable("good"))
+    monkeypatch.setattr(settings, "llm_providers", "bad,good")
+    run(llm.warm_up())
+    assert warmed == ["bad", "good"]

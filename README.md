@@ -52,6 +52,7 @@ flowchart LR
 ```
 
 - The Text model dropdown groups models by provider. The provider of the model you pick answers first; the other configured providers stay as fallback.
+- The Ollama list shows only models your key can actually use: Ollama's model list also names models your plan does not include (they answer 402), so each is checked once with a one-token request at startup and the result is cached for 12 hours. A paid key therefore sees more models with no code change.
 - `OLLAMA_API_KEY` enables the Ollama fallback. `OLLAMA_MODEL` pins a model; if unset, one is chosen from Ollama's live model list.
 - To add another provider: subclass `LLMProvider` (`llm/base.py`), then `register_provider("name", YourProvider)` in `llm/__init__.py` and add the name to `LLM_PROVIDERS`.
 - Voice: if a chosen OpenRouter voice cannot be used, the whole video is voiced again with one Edge voice of the same gender and language (never a mix). Turn off with `TTS_FALLBACK_TO_EDGE=false`.

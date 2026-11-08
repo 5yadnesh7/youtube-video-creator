@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,7 +17,9 @@ logging.basicConfig(level=logging.INFO)
 async def lifespan(_: FastAPI):
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
     store.fail_interrupted()
+    warm = asyncio.create_task(llm.warm_up())
     yield
+    warm.cancel()
 
 
 app = FastAPI(title="YouTube Video Creator", lifespan=lifespan)

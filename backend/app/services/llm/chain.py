@@ -60,3 +60,12 @@ async def chat_json(
             return extract_json(text)
         except ValueError as exc:
             raise LLMError(f"The model did not return valid JSON: {exc}") from exc
+
+
+async def warm_up() -> None:
+    """Runs each configured provider's slow preparation once, in the background at startup."""
+    for provider in provider_chain():
+        try:
+            await provider.warm()
+        except Exception as exc:
+            log.warning("could not warm up %s: %s", provider.name, exc)

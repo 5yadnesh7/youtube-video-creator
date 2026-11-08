@@ -28,6 +28,9 @@ async def catalog() -> ModelsResponse:
             except Exception as exc:
                 log.warning("could not list models for %s: %s", name, exc)
                 note = note or "could not load the model list"
+            else:
+                if not listed and available:
+                    note = provider.no_models_hint
         providers.append(
             ProviderInfo(id=provider.name, label=provider.label or provider.name,
                          configured=configured, available=available, note=note)

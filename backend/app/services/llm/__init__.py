@@ -1,6 +1,6 @@
 from app.services.llm.base import LLMError, LLMProvider
 from app.services.llm.catalog import catalog
-from app.services.llm.chain import chat_json, chat_text
+from app.services.llm.chain import chat_json, chat_text, warm_up
 from app.services.llm.factory import (
     UnknownProviderError,
     get_provider,
@@ -30,4 +30,5 @@ __all__ = [
     "register_provider",
     "requested_names",
     "split_model",
+    "warm_up",
 ]
