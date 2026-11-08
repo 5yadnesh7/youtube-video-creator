@@ -170,7 +170,7 @@ async def _fetch_reddit(client: httpx.AsyncClient) -> list[Trend]:
 
 
 async def _llm_rank(candidates: list[Trend], limit: int, model: str | None) -> list[Trend]:
-    from app.services.openrouter import chat_json
+    from app.services.llm import chat_json
 
     pool = candidates[:80]
     listing = "\n".join(f"{i}. [{t.source}] {t.title}" for i, t in enumerate(pool))
@@ -250,7 +250,7 @@ async def get_top_trends(
 
     merged = dedupe(_interleave([by_source[s] for s in SOURCE_ORDER if s in by_source]))
     trends: list[Trend] | None = None
-    if settings.openrouter_api_key:
+    if _llm_available():
         try:
             trends = await _llm_rank(merged, limit, model)
         except Exception as exc:
@@ -260,3 +260,12 @@ async def get_top_trends(
 
     _cache[limit] = (time.time(), trends)
     return list(trends)
+
+
+def _llm_available() -> bool:
+    try:
+        from app.services.llm import provider_chain
+
+        return bool(provider_chain())
+    except Exception:
+        return False

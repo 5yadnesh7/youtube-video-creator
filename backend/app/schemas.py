@@ -152,5 +152,6 @@ class Job(BaseModel):
     research: Optional[Research] = None
     seo: Optional[Seo] = None
     error: Optional[str] = None
+    notice: Optional[str] = None  # non-error heads-up, e.g. a voice or text provider was swapped
     video_ready: bool = False
     created_at: str

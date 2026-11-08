@@ -20,6 +20,7 @@ flowchart LR
 - Node 20+
 - FFmpeg and ffprobe on `PATH`
 - API keys: [OpenRouter](https://openrouter.ai), [Pexels](https://www.pexels.com/api/), [Pixabay](https://pixabay.com/api/docs/)
+- Optional: an [Ollama cloud key](https://ollama.com/settings/keys) as an automatic text fallback
 
 ## Setup
 
@@ -36,6 +37,23 @@ npm run dev                 # http://localhost:3000
 ```
 
 The frontend reads `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`, see `frontend/.env.local.example`).
+
+## Text providers and fallbacks
+
+Script, SEO, research and trend ranking all call one chain (`backend/app/services/llm/`). Providers are tried in the order of `LLM_PROVIDERS` (default `openrouter,ollama`); one without credentials is skipped, and a provider that fails or hits its quota hands over to the next.
+
+```mermaid
+flowchart LR
+    A[Text request] --> B[OpenRouter]
+    B -- quota / error --> C[Ollama cloud]
+    C -- error --> D[Clear error with both reasons]
+    B -- ok --> E[Reply]
+    C -- ok --> E
+```
+
+- `OLLAMA_API_KEY` enables the Ollama fallback. `OLLAMA_MODEL` pins a model; if unset, one is chosen from Ollama's live model list.
+- To add another provider: subclass `LLMProvider` (`llm/base.py`), then `register_provider("name", YourProvider)` in `llm/__init__.py` and add the name to `LLM_PROVIDERS`.
+- Voice: if a chosen OpenRouter voice cannot be used, the whole video is voiced again with one Edge voice of the same gender and language (never a mix). Turn off with `TTS_FALLBACK_TO_EDGE=false`.
 
 ## Tests
 

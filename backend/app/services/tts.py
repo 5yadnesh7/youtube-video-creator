@@ -3,6 +3,7 @@ import hashlib
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -370,3 +371,47 @@ async def synthesize_scenes(
         if f.name not in keep:
             f.unlink(missing_ok=True)
     return list(results)
+
+
+@dataclass
+class VoiceFallback:
+    voice_id: str
+    label: str
+    reason: str
+
+
+def fallback_voice_id(language: str, chosen: tuple[str, str], default_gender: str) -> str:
+    provider, voice = chosen
+    gender = OPENROUTER_MODELS[provider]["voices"].get(voice, "unknown")
+    if gender not in ("male", "female"):
+        gender = default_gender
+    return f"edge:{EDGE_VOICES[(language, gender)]}"
+
+
+def voice_label(voice_id: str, language: str) -> str:
+    for v in list_voices(language):
+        if v["id"] == voice_id:
+            return v["name"]
+    return voice_id
+
+
+async def synthesize_scenes_with_fallback(
+    scenes: list[Scene],
+    settings: JobSettings,
+    out_dir: Path,
+    model: Optional[str] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> tuple[list[SceneAudio], Optional[VoiceFallback]]:
+    """Like synthesize_scenes, but if the chosen OpenRouter voice is unavailable the WHOLE video is
+    voiced again with one Edge voice, so a video never mixes two voices."""
+    try:
+        return await synthesize_scenes(scenes, settings, out_dir, model, on_progress), None
+    except VoiceUnavailableError as exc:
+        chosen = parse_voice_id(settings.voice_id)
+        if not app_settings.tts_fallback_to_edge or chosen is None or chosen[0] == "edge":
+            raise
+        fallback_id = fallback_voice_id(settings.language, chosen, settings.voice)
+        log.warning("voice %s unavailable (%s); voicing the whole video with %s", settings.voice_id, exc, fallback_id)
+        cfg = settings.model_copy(update={"voice_id": fallback_id})
+        audio = await synthesize_scenes(scenes, cfg, out_dir, model, on_progress)
+        return audio, VoiceFallback(fallback_id, voice_label(fallback_id, settings.language), str(exc))

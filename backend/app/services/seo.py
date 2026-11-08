@@ -1,5 +1,5 @@
 from app.schemas import Chapter, JobSettings, Script, Seo
-from app.services.openrouter import chat_json
+from app.services.llm import chat_json
 
 MAX_CHAPTERS = 8
 SHORTS_MAX_SECONDS = 180

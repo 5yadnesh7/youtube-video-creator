@@ -4,7 +4,7 @@ import re
 from pydantic import ValidationError
 
 from app.schemas import JobSettings, Research, Scene, Script
-from app.services.openrouter import chat_json, chat_text
+from app.services.llm import chat_json, chat_text
 
 # Measured from real voices: edge/HeyGen speak English at ~141-151 wpm and Hinglish at ~128-137 wpm.
 WPM = {"english": 150, "hinglish": 130}

@@ -179,7 +179,7 @@ def start_render(job: Job, req: RenderRequest) -> Job:
     if req.voice_id:
         job.settings.voice_id = req.voice_id
     Stages.init(job, RENDER_STAGES).start("voice")
-    _update(job, status="rendering", step="Starting", progress=0, error=None)
+    _update(job, status="rendering", step="Starting", progress=0, error=None, notice=None)
     _spawn(job.id, lambda cancel: _render(job.id, cancel))
     return job
 
@@ -313,7 +313,7 @@ async def _render(job_id: str, cancel: threading.Event) -> None:
         def progress_for(key: str, noun: str) -> Callable[[int, int], None]:
             def cb(done: int, total: int) -> None:
                 fractions[key] = done / max(total, 1)
-                job.progress = 2 + int(43 * (fractions["voice"] + fractions["visuals"]) / 2)
+                job.progress = max(job.progress, 2 + int(43 * (fractions["voice"] + fractions["visuals"]) / 2))
                 tr.update(key, done=done, total=total, detail=f"{done} of {total} {noun}")
 
             return cb
@@ -322,14 +322,22 @@ async def _render(job_id: str, cancel: threading.Event) -> None:
             tr.start("voice", parallel=True)
             tr.update("voice", done=0, total=n, detail=f"0 of {n} scenes voiced")
             try:
-                audio = await tts.synthesize_scenes(
+                audio, fallback = await tts.synthesize_scenes_with_fallback(
                     scenes, job.settings, work / "audio", model,
                     on_progress=progress_for("voice", "scenes voiced"),
                 )
             except Exception:
                 tr.fail("voice")
                 raise
-            tr.finish("voice", f"{n} scenes voiced, {sum(a.duration for a in audio):.0f}s of audio")
+            detail = f"{n} scenes voiced, {sum(a.duration for a in audio):.0f}s of audio"
+            if fallback:
+                job.settings.voice_id = fallback.voice_id
+                job.notice = (
+                    "The voice you picked could not be used, so the whole video uses the Edge voice "
+                    f"{fallback.label} instead. Pick another voice and re-render if you want a different one."
+                )
+                detail += f" (Edge voice {fallback.label})"
+            tr.finish("voice", detail)
             return audio
 
         async def make_visuals():

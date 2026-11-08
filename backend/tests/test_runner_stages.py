@@ -410,3 +410,40 @@ def test_progress_combines_both_steps_and_never_goes_backwards(monkeypatch):
 
     asyncio.run(main())
     assert seen == sorted(seen) and seen[-1] == 100
+
+
+def test_voice_fallback_is_recorded_on_the_job_and_cleared_on_the_next_render(monkeypatch):
+    patch_fast_pipeline(monkeypatch)
+
+    async def with_fallback(scenes, cfg, out_dir, model=None, on_progress=None):
+        for i in range(len(scenes)):
+            on_progress(i + 1, len(scenes))
+        fb = tts.VoiceFallback("edge:en-US-JennyNeural", "Jenny (US)", "daily limit")
+        return [SceneAudio(path="a.mp3", duration=3.0) for _ in scenes], fb
+
+    monkeypatch.setattr(tts, "synthesize_scenes_with_fallback", with_fallback)
+
+    async def main():
+        job = make_job()
+        job.settings.voice_id = "heygen:nadine"
+        runner.start_render(job, RenderRequest(voice_id="heygen:nadine"))
+        await wait_until(lambda: store.get("job1").status == "done")
+
+    asyncio.run(main())
+    job = store.get("job1")
+    assert job.settings.voice_id == "edge:en-US-JennyNeural"
+    assert "Jenny (US)" in job.notice and "whole video" in job.notice
+    assert "Edge voice Jenny (US)" in job.stages[0].detail
+
+    async def without_fallback(scenes, cfg, out_dir, model=None, on_progress=None):
+        return [SceneAudio(path="a.mp3", duration=3.0) for _ in scenes], None
+
+    monkeypatch.setattr(tts, "synthesize_scenes_with_fallback", without_fallback)
+
+    async def main2():
+        runner.start_render(store.get("job1"), RenderRequest(voice_id="edge:en-US-GuyNeural"))
+        assert store.get("job1").notice is None
+        await wait_until(lambda: store.get("job1").status == "done")
+
+    asyncio.run(main2())
+    assert store.get("job1").notice is None

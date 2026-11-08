@@ -108,6 +108,7 @@ export interface Job {
   seo?: Seo | null;
   research?: Research | null;
   error?: string | null;
+  notice?: string | null;
   video_ready: boolean;
   created_at: string;
 }

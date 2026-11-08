@@ -117,9 +117,9 @@ def test_reddit_rss_fallback(patch_env):
 
 
 def test_fallback_ranking_when_llm_fails(monkeypatch):
-    # key set but app.services.openrouter missing/failing -> heuristic round-robin
+    # key set but app.services.llm missing/failing -> heuristic round-robin
     monkeypatch.setattr(tr.settings, "openrouter_api_key", "k")
-    monkeypatch.setitem(sys.modules, "app.services.openrouter", None)
+    monkeypatch.setitem(sys.modules, "app.services.llm", None)
     res = run(limit=3)
     assert [t.source for t in res] == ["google_trends", "google_news", "reddit"]
 
@@ -133,9 +133,10 @@ def test_llm_ranking(monkeypatch):
             ]
         }
 
-    mod = types.ModuleType("app.services.openrouter")
+    mod = types.ModuleType("app.services.llm")
     mod.chat_json = chat_json
-    monkeypatch.setitem(sys.modules, "app.services.openrouter", mod)
+    mod.provider_chain = lambda: [object()]
+    monkeypatch.setitem(sys.modules, "app.services.llm", mod)
     monkeypatch.setattr(tr.settings, "openrouter_api_key", "k")
     res = run(limit=3)
     assert len(res) == 1 and res[0].category == "sports" and res[0].angle == "Why"

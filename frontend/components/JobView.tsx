@@ -88,6 +88,19 @@ function FailedCard({
               </a>
               .
             </li>
+            <li>
+              Or add an automatic fallback: create an{" "}
+              <a
+                href="https://ollama.com/settings/keys"
+                target="_blank"
+                rel="noreferrer"
+                className={`inline-flex min-h-6 items-center rounded font-medium underline ${FOCUS}`}
+              >
+                Ollama key
+              </a>
+              , put <code className="rounded bg-white/70 px-1 dark:bg-black/30">OLLAMA_API_KEY=…</code> in{" "}
+              <code className="rounded bg-white/70 px-1 dark:bg-black/30">.env</code> and restart the backend.
+            </li>
           </ul>
           <details className="mt-3">
             <summary className={`flex min-h-11 cursor-pointer items-center rounded ${FOCUS}`}>Show raw error</summary>
@@ -386,11 +399,22 @@ export function JobView({
 
   const target = job.settings.duration_seconds;
   const header = (
-    <div className="mb-4 flex flex-wrap items-center gap-2">
-      <h1 className="min-w-0 text-xl font-semibold [overflow-wrap:anywhere]">{job.script?.title || job.topic}</h1>
-      <StatusPill status={job.status} />
-      <FormatChip format={job.settings.format} />
-    </div>
+    <>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <h1 className="min-w-0 text-xl font-semibold [overflow-wrap:anywhere]">{job.script?.title || job.topic}</h1>
+        <StatusPill status={job.status} />
+        <FormatChip format={job.settings.format} />
+      </div>
+      {job.notice && (
+        <div
+          role="status"
+          className="mb-4 rounded-xl border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+        >
+          <span className="font-semibold">Heads-up: </span>
+          <span className="[overflow-wrap:anywhere]">{job.notice}</span>
+        </div>
+      )}
+    </>
   );
 
   const pollErr = error && active(job) && (

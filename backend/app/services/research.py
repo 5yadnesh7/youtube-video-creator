@@ -340,7 +340,7 @@ async def _search_wikipedia(q: str) -> Candidate | None:
 
 
 async def _llm_queries(topic: str, model: str | None) -> list[str]:
-    from app.services.openrouter import chat_json
+    from app.services.llm import chat_json
 
     messages = [
         {"role": "system", "content": "You write news search queries. Reply with JSON only."},
@@ -360,7 +360,7 @@ async def _llm_queries(topic: str, model: str | None) -> list[str]:
 async def build_queries(topic: str, model: str | None = None) -> list[str]:
     cleaned, _ = _strip_publisher(_clean(topic))
     queries = [cleaned, shorten_query(topic)]
-    if settings.openrouter_api_key and len(cleaned.split()) > 6:
+    if _llm_available() and len(cleaned.split()) > 6:
         try:
             queries += await _llm_queries(cleaned, model)
         except Exception as exc:
@@ -598,7 +598,7 @@ def heuristic_brief(articles: list[Candidate]) -> str:
 
 
 async def llm_brief(topic: str, articles: list[Candidate], model: str | None, timeout: float) -> str:
-    from app.services.openrouter import chat_text
+    from app.services.llm import chat_text
 
     per = min(900, max(300, MAX_TOTAL_LLM_WORDS // max(1, len(articles))))
     parts = []
@@ -669,7 +669,7 @@ async def _pipeline(
 
     brief = ""
     llm_note = ""
-    if grounded and settings.openrouter_api_key:
+    if grounded and _llm_available():
         remaining = deadline - loop.time() - 2
         if remaining > 4:
             try:
@@ -725,3 +725,12 @@ async def research_topic(
     if result.grounded:
         _cache[key] = (time.time(), result)
     return result
+
+
+def _llm_available() -> bool:
+    try:
+        from app.services.llm import provider_chain
+
+        return bool(provider_chain())
+    except Exception:
+        return False

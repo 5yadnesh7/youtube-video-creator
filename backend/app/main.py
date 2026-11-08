@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.config import settings
 from app.jobs import store
+from app.services import llm
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,5 +37,10 @@ async def health() -> dict:
             "openrouter": bool(settings.openrouter_api_key),
             "pexels": bool(settings.pexels_api_key),
             "pixabay": bool(settings.pixabay_api_key),
+            "ollama": bool(settings.ollama_api_key),
+        },
+        "text_providers": {
+            "order": llm.requested_names(),
+            "active": [p.name for p in llm.provider_chain()],
         },
     }
