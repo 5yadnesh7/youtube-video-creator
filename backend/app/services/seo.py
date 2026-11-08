@@ -2,6 +2,7 @@ from app.schemas import Chapter, JobSettings, Script, Seo
 from app.services.openrouter import chat_json
 
 MAX_CHAPTERS = 8
+SHORTS_MAX_SECONDS = 180
 DESC_LIMIT = 2000
 
 
@@ -43,11 +44,12 @@ async def generate_seo(
     model: str | None = None,
 ) -> Seo:
     vertical = settings.format == "vertical"
+    is_short = vertical and settings.duration_seconds <= SHORTS_MAX_SECONDS
     starts = scene_starts or []
 
     chapters: list[Chapter] = []
     group = 1
-    if not vertical and starts:
+    if not is_short and starts:
         n = min(len(script.scenes), len(starts))
         group = -(-n // MAX_CHAPTERS)
         for i in range(0, n, group):
@@ -70,7 +72,7 @@ async def generate_seo(
             "one per segment below, in order. The first is the intro.\nSegments:\n" + "\n".join(segs)
         )
 
-    prompt = f"""Create YouTube SEO metadata for this {"Short (vertical)" if vertical else "video (horizontal)"}.
+    prompt = f"""Create YouTube SEO metadata for this {"Short (vertical)" if is_short else "vertical video" if vertical else "video (horizontal)"}.
 {lang_note}
 Video title: {script.title}
 Script: {narration}
@@ -106,7 +108,7 @@ Return JSON only with keys:
     hashtags = _dedupe([_hashtag(str(h)) for h in raw_ht])
     if not hashtags:
         hashtags = _dedupe([_hashtag(t) for t in tags[:3]])
-    if vertical:
+    if is_short:
         hashtags = [h for h in hashtags if h.lower() != "#shorts"][:4] + ["#Shorts"]
     else:
         hashtags = hashtags[:5]

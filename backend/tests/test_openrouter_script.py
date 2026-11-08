@@ -314,3 +314,26 @@ def test_media_manifest_reused_only_when_scenes_unchanged(tmp_path):
     f.unlink()
     manifest.write_text(_json.dumps({"key": runner._media_key(scenes), "items": items}))
     assert runner._load_media_manifest(manifest, scenes) is None
+
+
+def test_seo_vertical_at_three_minutes_is_still_a_short(fake_net):
+    fake_net["chat_handler"] = lambda body: httpx.Response(200, json=completion(json.dumps(SEO_REPLY)))
+    seo = run(seo_mod.generate_seo(SCRIPT, JobSettings(format="vertical", duration_seconds=180), [0.0, 5.0]))
+    assert "#Shorts" in seo.hashtags and seo.chapters == []
+
+
+def test_seo_long_vertical_is_not_a_short_and_gets_chapters(fake_net):
+    fake_net["chat_handler"] = lambda body: httpx.Response(200, json=completion(json.dumps(SEO_REPLY)))
+    starts = [i * 8.0 for i in range(30)]
+    seo = run(seo_mod.generate_seo(SCRIPT, JobSettings(format="vertical", duration_seconds=240), starts))
+    assert "#Shorts" not in seo.hashtags
+    assert seo.chapters and seo.chapters[0].start_seconds == 0 and len(seo.chapters) <= 8
+
+
+@pytest.mark.parametrize("fmt", ["vertical", "horizontal"])
+@pytest.mark.parametrize("seconds,words", [(120, 300), (180, 450), (240, 600), (300, 750)])
+def test_script_targets_for_two_to_five_minutes(fmt, seconds, words):
+    s = JobSettings(format=fmt, duration_seconds=seconds)
+    w, scenes = script_mod._targets(s)
+    assert w == words
+    assert scenes == round(seconds / (8 if fmt == "vertical" else 11))

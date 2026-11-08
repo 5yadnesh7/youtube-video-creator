@@ -157,7 +157,7 @@ async def generate_script(
 
     for _ in range(MAX_ATTEMPTS):
         try:
-            data = await chat_json(messages, model=model or settings.model, temperature=0.8, max_tokens=4096)
+            data = await chat_json(messages, model=model or settings.model, temperature=0.8, max_tokens=max(4096, words * 5))
             script = _parse(data)
         except (ValueError, ValidationError, RuntimeError) as e:
             last_err = e
