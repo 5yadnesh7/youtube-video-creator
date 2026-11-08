@@ -30,11 +30,22 @@ export interface ModelInfo {
   id: string;
   name: string;
   context_length: number;
+  provider: string;
+  provider_label: string;
+}
+
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  configured: boolean;
+  available: boolean;
+  note: string;
 }
 
 export interface ModelsResponse {
   models: ModelInfo[];
   default: string;
+  providers: ProviderInfo[];
 }
 
 export interface Trend {

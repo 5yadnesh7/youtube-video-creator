@@ -3,7 +3,7 @@
 import { useEffect, useId, useState } from "react";
 import { api, errorMessage } from "@/lib/api";
 import { DURATIONS } from "@/lib/settings";
-import type { JobSettings, ModelsResponse, VideoFormat } from "@/lib/types";
+import type { JobSettings, ModelsResponse, ProviderInfo, VideoFormat } from "@/lib/types";
 import { Button, Card, ErrorBox, Skeleton, inputCls } from "./ui";
 
 function FormatIcon({ format }: { format: VideoFormat }) {
@@ -97,6 +97,7 @@ export function SettingsStep({
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const modelId = useId();
+  const modelHelpId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -200,19 +201,34 @@ export function SettingsStep({
         ) : !models ? (
           <Skeleton className="h-11 w-full" />
         ) : (
-          <select
-            id={modelId}
-            className={inputCls}
-            value={settings.model ?? models.default}
-            onChange={(e) => set({ model: e.target.value })}
-          >
-            {models.models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.id === models.default ? " (default)" : ""}
-              </option>
-            ))}
-          </select>
+          <>
+            <select
+              id={modelId}
+              className={inputCls}
+              value={settings.model ?? models.default}
+              onChange={(e) => set({ model: e.target.value })}
+              aria-describedby={modelHelpId}
+            >
+              {models.providers.map((p) => (
+                <optgroup key={p.id} label={providerGroupLabel(p)}>
+                  {models.models.filter((m) => m.provider === p.id).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                      {m.id === models.default ? " (default)" : ""}
+                    </option>
+                  ))}
+                  {!models.models.some((m) => m.provider === p.id) && (
+                    <option disabled value={`__${p.id}`}>
+                      {p.note || "No models available"}
+                    </option>
+                  )}
+                </optgroup>
+              ))}
+            </select>
+            <p id={modelHelpId} className="mt-1.5 text-sm text-zinc-600 dark:text-zinc-400">
+              {modelHelp(models, settings.model ?? models.default)}
+            </p>
+          </>
         )}
       </Field>
 
@@ -221,4 +237,20 @@ export function SettingsStep({
       </div>
     </Card>
   );
+}
+
+function providerGroupLabel(p: ProviderInfo): string {
+  if (!p.configured) return `${p.label} (not set up)`;
+  if (!p.available) return `${p.label} (quota used up, others take over)`;
+  return p.label;
+}
+
+function modelHelp(models: ModelsResponse, value: string): string {
+  const picked = models.models.find((m) => m.id === value);
+  if (!picked) return "";
+  const others = models.providers.filter((p) => p.configured && p.id !== picked.provider).map((p) => p.label);
+  if (!others.length) {
+    return `${picked.provider_label} writes the script. No fallback is set up: add OLLAMA_API_KEY in .env to use Ollama cloud when this one fails.`;
+  }
+  return `${picked.provider_label} answers first. If it fails or runs out of quota, ${others.join(" or ")} takes over.`;
 }

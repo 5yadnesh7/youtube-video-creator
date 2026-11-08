@@ -2,6 +2,7 @@ import logging
 
 from app.services.llm.base import LLMError
 from app.services.llm.factory import provider_chain
+from app.services.llm.ids import split_model
 from app.services.openrouter import extract_json
 
 log = logging.getLogger(__name__)
@@ -17,12 +18,20 @@ async def chat_text(
     providers = provider_chain()
     if not providers:
         raise LLMError("No text provider is configured. Set OPENROUTER_API_KEY or OLLAMA_API_KEY in .env.")
+    owner, raw = split_model(model)
+    if owner:
+        # The user picked a model: its provider answers first, the others stay as fallback.
+        providers = sorted(providers, key=lambda p: p.name != owner)
     failures: list[str] = []
     for provider in providers:
-        # An explicit model id only makes sense for the provider that owns it.
-        use_model = model if provider.accepts_model(model) else None
+        if owner:
+            use_model = raw if provider.name == owner else None
+        else:
+            use_model = raw if provider.accepts_model(raw) else None
         try:
-            return await provider.chat_text(messages, use_model, temperature, max_tokens)
+            text = await provider.chat_text(messages, use_model, temperature, max_tokens)
+            log.info("text answered by %s (%s)", provider.name, use_model or "its default model")
+            return text
         except Exception as exc:  # CancelledError is not an Exception, so a stop request still propagates
             log.warning("text provider %s failed: %s", provider.name, exc)
             failures.append(f"{provider.label or provider.name}: {exc}")

@@ -17,7 +17,7 @@ from app.schemas import (
     VoicePreviewRequest,
     VoicesResponse,
 )
-from app.services import openrouter, trends, tts
+from app.services import llm, trends, tts
 
 router = APIRouter(prefix="/api")
 
@@ -31,10 +31,7 @@ def _job_or_404(job_id: str) -> Job:
 
 @router.get("/models", response_model=ModelsResponse)
 async def models() -> ModelsResponse:
-    return ModelsResponse(
-        models=await openrouter.list_free_models(),
-        default=await openrouter.default_model(),
-    )
+    return await llm.catalog()
 
 
 @router.get("/trends", response_model=list[Trend])

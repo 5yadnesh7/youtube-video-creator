@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from app.schemas import ModelInfo
+
 
 class LLMError(RuntimeError):
     """No configured text provider could answer."""
@@ -26,3 +28,17 @@ class LLMProvider(ABC):
     def accepts_model(self, model: str | None) -> bool:
         """Whether an explicitly requested model id belongs to this provider."""
         return False
+
+    setup_hint: str = ""
+
+    def is_available(self) -> bool:
+        """False while the provider is configured but temporarily unusable (e.g. quota used up)."""
+        return True
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Models offered in the picker; ids must be encoded with ids.encode_model."""
+        return []
+
+    async def default_model(self) -> str | None:
+        """Encoded id of the model this provider uses when the user picks none."""
+        return None

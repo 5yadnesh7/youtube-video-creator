@@ -408,3 +408,158 @@ def test_settings_defaults_keep_fallbacks_on_and_ollama_off():
     assert fresh.llm_providers == "openrouter,ollama"
     assert fresh.ollama_api_key == "" and fresh.ollama_base_url == "https://ollama.com"
     assert fresh.tts_fallback_to_edge is True
+
+
+# ---------- model ids and the grouped picker
+
+def test_model_ids_round_trip_with_their_provider():
+    from app.services.llm import encode_model, split_model
+
+    assert encode_model("ollama", "gpt-oss:120b") == "ollama:gpt-oss:120b"
+    assert split_model("ollama:gpt-oss:120b") == ("ollama", "gpt-oss:120b")
+    assert split_model("openrouter:google/gemma-4-31b-it:free") == ("openrouter", "google/gemma-4-31b-it:free")
+    # legacy ids without a provider prefix are left alone, even though they contain colons
+    assert split_model("gpt-oss:120b") == (None, "gpt-oss:120b")
+    assert split_model("google/gemma-4-31b-it:free") == (None, "google/gemma-4-31b-it:free")
+    assert split_model(None) == (None, None) and split_model("") == (None, "")
+    assert split_model("ollama:") == (None, "ollama:")
+
+
+def test_a_picked_ollama_model_is_asked_first_and_openrouter_stays_as_fallback(monkeypatch):
+    router = FakeProvider("openrouter")
+    ollama = FakeProvider("ollama", reply_text="from ollama")
+    factory.register_provider("openrouter", lambda: router)
+    factory.register_provider("ollama", lambda: ollama)
+    run(llm.chat_text(MESSAGES, model="ollama:gpt-oss:120b"))
+    assert ollama.calls == ["gpt-oss:120b"] and router.calls == []
+
+    ollama.calls.clear()
+    ollama._fail = RuntimeError("down")
+    assert run(llm.chat_text(MESSAGES, model="ollama:gpt-oss:120b")) == "ok"
+    assert ollama.calls == ["gpt-oss:120b"] and router.calls == [None]  # the fallback uses its own default model
+
+
+def test_a_picked_openrouter_model_keeps_openrouter_first(monkeypatch):
+    router = FakeProvider("openrouter")
+    ollama = FakeProvider("ollama")
+    factory.register_provider("openrouter", lambda: router)
+    factory.register_provider("ollama", lambda: ollama)
+    monkeypatch.setattr(settings, "llm_providers", "ollama,openrouter")  # configured order says Ollama first
+    run(llm.chat_text(MESSAGES, model="openrouter:meta-llama/llama-3.3-70b-instruct:free"))
+    assert router.calls == ["meta-llama/llama-3.3-70b-instruct:free"] and ollama.calls == []
+
+
+def test_a_picked_model_of_an_unconfigured_provider_falls_back_to_defaults(monkeypatch):
+    router = FakeProvider("openrouter")
+    factory.register_provider("openrouter", lambda: router)
+    monkeypatch.setattr(settings, "ollama_api_key", "")
+    run(llm.chat_text(MESSAGES, model="ollama:gpt-oss:120b"))
+    assert router.calls == [None]
+
+
+class CatalogProvider(FakeProvider):
+    def __init__(self, name, models, available=True, configured=True, default=None, fail_list=False, hint=""):
+        super().__init__(name, configured=configured)
+        self._models, self._available, self._default, self._fail_list = models, available, default, fail_list
+        self.setup_hint = hint
+
+    def is_available(self):
+        return self._available
+
+    async def list_models(self):
+        if self._fail_list:
+            raise RuntimeError("listing failed")
+        from app.schemas import ModelInfo
+
+        return [ModelInfo(id=f"{self.name}:{m}", name=m, provider=self.name, provider_label=self.label) for m in self._models]
+
+    async def default_model(self):
+        return f"{self.name}:{self._default or self._models[0]}"
+
+
+def test_catalog_groups_models_by_provider_in_configured_order(monkeypatch):
+    factory.register_provider("one", lambda: CatalogProvider("one", ["a", "b"], default="b"))
+    factory.register_provider("two", lambda: CatalogProvider("two", ["c"]))
+    monkeypatch.setattr(settings, "llm_providers", "one,two")
+    c = run(llm.catalog())
+    assert [p.id for p in c.providers] == ["one", "two"]
+    assert [m.id for m in c.models] == ["one:a", "one:b", "two:c"]
+    assert c.default == "one:b" and all(p.configured and p.available for p in c.providers)
+
+
+def test_catalog_skips_an_unavailable_provider_for_the_default_but_still_lists_it(monkeypatch):
+    factory.register_provider("one", lambda: CatalogProvider("one", ["a"], available=False))
+    factory.register_provider("two", lambda: CatalogProvider("two", ["c"]))
+    monkeypatch.setattr(settings, "llm_providers", "one,two")
+    c = run(llm.catalog())
+    assert c.default == "two:c"
+    one = c.providers[0]
+    assert one.configured and not one.available and "quota" in one.note
+    assert [m.id for m in c.models] == ["one:a", "two:c"]
+
+
+def test_catalog_shows_an_unconfigured_provider_with_its_setup_hint(monkeypatch):
+    factory.register_provider("one", lambda: CatalogProvider("one", ["a"]))
+    factory.register_provider("two", lambda: CatalogProvider("two", ["c"], configured=False, hint="Set TWO_KEY in .env"))
+    monkeypatch.setattr(settings, "llm_providers", "one,two")
+    c = run(llm.catalog())
+    two = c.providers[1]
+    assert not two.configured and two.note == "Set TWO_KEY in .env"
+    assert [m.id for m in c.models] == ["one:a"]
+
+
+def test_catalog_survives_a_provider_that_cannot_list_its_models(monkeypatch):
+    factory.register_provider("one", lambda: CatalogProvider("one", ["a"], fail_list=True))
+    factory.register_provider("two", lambda: CatalogProvider("two", ["c"]))
+    monkeypatch.setattr(settings, "llm_providers", "one,two")
+    c = run(llm.catalog())
+    assert c.default == "two:c" and "could not load" in c.providers[0].note
+
+
+def test_catalog_with_nothing_configured_is_empty_but_explains_what_to_set(monkeypatch):
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.setattr(settings, "ollama_api_key", "")
+    c = run(llm.catalog())
+    assert c.models == [] and c.default == ""
+    assert {p.id: p.note for p in c.providers} == {
+        "openrouter": "Set OPENROUTER_API_KEY in .env", "ollama": "Set OLLAMA_API_KEY in .env"}
+
+
+def test_ollama_lists_only_text_models_with_preferred_ones_first(monkeypatch):
+    mock_ollama(monkeypatch, lambda r: httpx.Response(200, json=TAGS))
+    models = run(OllamaProvider().list_models())
+    assert [m.id for m in models] == ["ollama:gpt-oss:120b", "ollama:gemma4:31b", "ollama:kimi-k3"]
+    assert all(m.provider == "ollama" and m.provider_label == "Ollama cloud" for m in models)
+
+
+def test_ollama_default_model_honours_the_setting(monkeypatch):
+    mock_ollama(monkeypatch, lambda r: httpx.Response(200, json=TAGS))
+    assert run(OllamaProvider().default_model()) == "ollama:gpt-oss:120b"
+    monkeypatch.setattr(settings, "ollama_model", "gemma4:31b")
+    assert run(OllamaProvider().default_model()) == "ollama:gemma4:31b"
+
+
+def test_openrouter_models_are_listed_with_provider_prefixed_ids(monkeypatch):
+    models_payload = {"data": [{"id": "meta-llama/llama-3.3-70b-instruct:free", "name": "Llama", "context_length": 1000,
+                                "pricing": {"prompt": "0", "completion": "0"},
+                                "architecture": {"output_modalities": ["text"]}}]}
+    mock_openrouter(monkeypatch, lambda r: httpx.Response(200, json=models_payload))
+    openrouter._cache.update({"at": 0.0, "models": []})
+    listed = run(llm.get_provider("openrouter").list_models())
+    assert listed[0].id == "openrouter:meta-llama/llama-3.3-70b-instruct:free"
+    assert listed[0].provider == "openrouter" and listed[0].provider_label == "OpenRouter"
+    assert run(llm.get_provider("openrouter").default_model()) == listed[0].id
+
+
+def test_models_endpoint_returns_grouped_catalog(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    factory.register_provider("one", lambda: CatalogProvider("one", ["a"]))
+    monkeypatch.setattr(settings, "llm_providers", "one")
+    with TestClient(app) as client:
+        data = client.get("/api/models").json()
+    assert data["default"] == "one:a"
+    assert data["models"][0] == {"id": "one:a", "name": "a", "context_length": 0, "provider": "one", "provider_label": "One"}
+    assert data["providers"][0]["id"] == "one" and data["providers"][0]["configured"] is True

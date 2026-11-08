@@ -22,14 +22,25 @@ class JobSettings(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    id: str
+    id: str  # value to send back as settings.model, prefixed with its provider: "ollama:gpt-oss:120b"
     name: str
     context_length: int = 0
+    provider: str = "openrouter"
+    provider_label: str = "OpenRouter"
+
+
+class ProviderInfo(BaseModel):
+    id: str
+    label: str
+    configured: bool
+    available: bool = True  # False while e.g. a free quota is used up
+    note: str = ""  # why a provider is greyed out or limited
 
 
 class ModelsResponse(BaseModel):
     models: list[ModelInfo]
     default: str
+    providers: list[ProviderInfo] = Field(default_factory=list)
 
 
 class Trend(BaseModel):

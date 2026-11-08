@@ -12,8 +12,8 @@ from app.config import settings
 from app.jobs import store
 from app.schemas import CreateJobRequest, Job, RenderRequest, Research, SceneMedia, Script, Stage
 from app.services import (
+    llm,
     media,
-    openrouter,
     render,
     research as research_svc,
     script as script_svc,
@@ -206,7 +206,7 @@ def _finish_cancelled(job: Job) -> None:
 
 
 async def _resolve_model(job: Job) -> str:
-    return job.settings.model or await openrouter.default_model()
+    return job.settings.model or (await llm.catalog()).default or None
 
 
 async def _generate_script(job_id: str) -> None:
